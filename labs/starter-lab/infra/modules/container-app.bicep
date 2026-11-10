@@ -14,6 +14,10 @@ param logAnalyticsWorkspaceId string
 @secure()
 param logAnalyticsWorkspaceKey string
 
+@description('Workload telemetry connection string; empty preserves the original deployment.')
+@secure()
+param appInsightsConnectionString string = ''
+
 // Container App Environment
 resource containerAppEnv 'Microsoft.App/managedEnvironments@2024-03-01' = {
   name: containerAppEnvName
@@ -87,6 +91,10 @@ resource containerApp 'Microsoft.App/containerApps@2024-03-01' = {
             {
               name: 'ASPNETCORE_ENVIRONMENT'
               value: 'Production'
+            }
+            {
+              name: 'APPLICATIONINSIGHTS_CONNECTION_STRING'
+              value: appInsightsConnectionString
             }
           ]
         }

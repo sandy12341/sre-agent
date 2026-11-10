@@ -3,7 +3,14 @@ set -euo pipefail
 
 LAB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TMP_DIR="$(mktemp -d)"
-PYTHON_BIN="$(command -v python3)"
+PYTHON_BIN=""
+for candidate in python3 python; do
+  if command -v "$candidate" >/dev/null && "$candidate" -c "import yaml" >/dev/null 2>&1; then
+    PYTHON_BIN="$(command -v "$candidate")"
+    break
+  fi
+done
+[[ -n "$PYTHON_BIN" ]] || { echo "Python 3 with PyYAML is required" >&2; exit 1; }
 trap 'rm -rf "$TMP_DIR"' EXIT
 mkdir -p "$TMP_DIR/bin"
 
@@ -93,7 +100,8 @@ if [[ "$write_code" == true ]]; then printf '200'; fi
 EOF
 
 chmod +x "$TMP_DIR/bin/azd" "$TMP_DIR/bin/az" "$TMP_DIR/bin/curl" "$TMP_DIR/bin/sleep"
-ln -s "$PYTHON_BIN" "$TMP_DIR/bin/python3"
+printf '#!/usr/bin/env bash\nexec %q "$@"\n' "$PYTHON_BIN" > "$TMP_DIR/bin/python3"
+chmod +x "$TMP_DIR/bin/python3"
 
 run_scenario() {
   local github_user="$1"

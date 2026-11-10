@@ -1,0 +1,12 @@
+{
+  "sourceRepository": "msbrettorg/sre-agent",
+  "sourceCommit": "16adb2e6c04ff6c6dd24b66fd6bbd02fe415b688",
+  "demoRepository": "sandy12341/sre-agent",
+  "demoBranch": "demo/customer-ready",
+  "applicationRepository": "sandy12341/grubify",
+  "applicationBaseCommit": "6592accc6eef73e2d7c7339885386480cb49838f",
+  "applicationCommit": "376129c5400d52f4c6691669d397eece1b19104c",
+  "applicationRef": "demo/starter-source",
+  "issueMarker": "[Starter Demo]",
+  "phase": 1
+}

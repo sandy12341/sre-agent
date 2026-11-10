@@ -2,6 +2,10 @@
 
 Deploy an Azure SRE Agent, break a sample app, and watch it diagnose and fix the issue. **~40 minutes.**
 
+**Already have an agent?** Follow the [customer-demo reuse guide](CUSTOMER-DEMO.md)
+to keep that agent intact and deploy Grubify into a separate disposable resource
+group. The steps below are the original **new-agent** path.
+
 ## Architecture
 
 <p align="center">

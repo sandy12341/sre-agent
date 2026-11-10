@@ -4,6 +4,8 @@ param environmentName string
 @description('Location for all resources')
 param location string
 
+param createAgent bool = true
+
 // ============================================================
 // Variables
 // ============================================================
@@ -30,7 +32,7 @@ module monitoring 'modules/monitoring.bicep' = {
 // ============================================================
 // Module: Managed Identity + RBAC
 // ============================================================
-module identity 'modules/identity.bicep' = {
+module identity 'modules/identity.bicep' = if (createAgent) {
   name: 'identity'
   params: {
     location: location
@@ -49,19 +51,20 @@ module containerApp 'modules/container-app.bicep' = {
     containerAppName: containerAppName
     logAnalyticsWorkspaceId: monitoring.outputs.logAnalyticsWorkspaceId
     logAnalyticsWorkspaceKey: monitoring.outputs.logAnalyticsWorkspaceKey
+    appInsightsConnectionString: createAgent ? '' : monitoring.outputs.appInsightsConnectionString
   }
 }
 
 // ============================================================
 // Module: SRE Agent
 // ============================================================
-module sreAgent 'modules/sre-agent.bicep' = {
+module sreAgent 'modules/sre-agent.bicep' = if (createAgent) {
   name: 'sre-agent'
   params: {
     location: location
     agentName: agentName
-    identityId: identity.outputs.identityId
-    identityPrincipalId: identity.outputs.identityPrincipalId
+    identityId: identity!.outputs.identityId
+    identityPrincipalId: identity!.outputs.identityPrincipalId
     appInsightsAppId: monitoring.outputs.appInsightsAppId
     appInsightsConnectionString: monitoring.outputs.appInsightsConnectionString
     appInsightsId: monitoring.outputs.appInsightsId
@@ -83,9 +86,9 @@ module alertRules 'modules/alert-rules.bicep' = {
 // ============================================================
 // Outputs
 // ============================================================
-output agentName string = sreAgent.outputs.agentName
-output agentEndpoint string = sreAgent.outputs.agentEndpoint
-output agentPortalUrl string = sreAgent.outputs.agentPortalUrl
+output agentName string = createAgent ? sreAgent!.outputs.agentName : ''
+output agentEndpoint string = createAgent ? sreAgent!.outputs.agentEndpoint : ''
+output agentPortalUrl string = createAgent ? sreAgent!.outputs.agentPortalUrl : ''
 output containerAppUrl string = containerApp.outputs.containerAppUrl
 output containerAppName string = containerApp.outputs.containerAppName
 output frontendAppUrl string = containerApp.outputs.frontendAppUrl
@@ -94,5 +97,6 @@ output containerAppEnvName string = containerApp.outputs.containerAppEnvName
 output containerAppEnvId string = containerApp.outputs.containerAppEnvId
 output acrName string = containerApp.outputs.acrName
 output acrLoginServer string = containerApp.outputs.acrLoginServer
-output identityPrincipalId string = identity.outputs.identityPrincipalId
+output identityPrincipalId string = createAgent ? identity!.outputs.identityPrincipalId : ''
 output logAnalyticsWorkspaceId string = monitoring.outputs.logAnalyticsWorkspaceId
+output appInsightsId string = monitoring.outputs.appInsightsId

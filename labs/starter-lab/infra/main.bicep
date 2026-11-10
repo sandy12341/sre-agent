@@ -6,12 +6,20 @@ param environmentName string
 @description('Primary location for all resources')
 param location string = 'eastus2'
 
+@description('Reuse this existing agent without deploying or changing agent infrastructure. Empty preserves the original new-agent deployment.')
+param existingAgentResourceId string = ''
+
+var createAgent = empty(existingAgentResourceId)
+
 // Resource group
 var resourceGroupName = 'rg-${environmentName}'
 
 resource rg 'Microsoft.Resources/resourceGroups@2024-03-01' = {
   name: resourceGroupName
   location: location
+  tags: createAgent ? {} : {
+    'starter-demo-owner': environmentName
+  }
 }
 
 // Deploy all resources into the resource group
@@ -21,13 +29,14 @@ module resources 'resources.bicep' = {
   params: {
     environmentName: environmentName
     location: location
+    createAgent: createAgent
   }
 }
 
 // ============================================================
 // Subscription-scoped RBAC for SRE Agent managed identity
 // ============================================================
-module subscriptionRbac 'modules/subscription-rbac.bicep' = {
+module subscriptionRbac 'modules/subscription-rbac.bicep' = if (createAgent) {
   name: 'subscription-rbac'
   params: {
     principalId: resources.outputs.identityPrincipalId
@@ -43,9 +52,11 @@ output AZURE_CONTAINER_APPS_ENVIRONMENT_NAME string = resources.outputs.containe
 output AZURE_CONTAINER_APPS_ENVIRONMENT_ID string = resources.outputs.containerAppEnvId
 output SRE_AGENT_NAME string = resources.outputs.agentName
 output SRE_AGENT_ENDPOINT string = resources.outputs.agentEndpoint
+output EXISTING_SRE_AGENT_RESOURCE_ID string = existingAgentResourceId
 output AGENT_PORTAL_URL string = resources.outputs.agentPortalUrl
 output CONTAINER_APP_URL string = resources.outputs.containerAppUrl
 output CONTAINER_APP_NAME string = resources.outputs.containerAppName
 output FRONTEND_APP_URL string = resources.outputs.frontendAppUrl
 output FRONTEND_APP_NAME string = resources.outputs.frontendAppName
 output LOG_ANALYTICS_WORKSPACE_ID string = resources.outputs.logAnalyticsWorkspaceId
+output APP_INSIGHTS_RESOURCE_ID string = resources.outputs.appInsightsId
