@@ -33,7 +33,10 @@ class FakeAgent:
             "id": AGENT_ID, "identity": {"principalId": "identity"}, "location": "westus2",
             "properties": {
                 "actionConfiguration": {"mode": "review"},
-                "incidentManagementConfiguration": {"type": "ServiceNow", "connectionName": "existing"},
+                "incidentManagementConfiguration": {
+                    "type": "ServiceNow", "connectionName": "existing",
+                    "apiConnectionName": "existing-service-now-connection",
+                },
                 "knowledgeGraphConfiguration": {
                     "identity": "identity", "managedResources": ["/subscriptions/sub"],
                 },
@@ -101,6 +104,47 @@ class ExistingAgentTests(unittest.TestCase):
 
     def configure(self):
         demo.configure(self.agent, VALUES, self.state, True, True)
+
+    def test_arm_patch_accepts_empty_response_and_waits_for_completion(self):
+        agent = demo.Agent.__new__(demo.Agent)
+        agent.arm_url = "https://management.azure.com/example"
+        desired = {"incidentManagementConfiguration": {"type": "AzMonitor"}}
+        pending = {"properties": {**desired, "provisioningState": "InProgress"}}
+        completed = {"properties": {**desired, "provisioningState": "Succeeded"}}
+        with patch.object(demo, "run", return_value=""), \
+                patch.object(agent, "read_arm", side_effect=[pending, completed]) as read, \
+                patch.object(demo.time, "sleep") as sleep:
+            agent.patch(desired)
+        self.assertEqual(read.call_count, 2)
+        sleep.assert_called_once_with(5)
+        self.assertEqual(agent.arm, completed)
+
+    def test_arm_patch_surfaces_terminal_failure(self):
+        agent = demo.Agent.__new__(demo.Agent)
+        agent.arm_url = "https://management.azure.com/example"
+        with patch.object(demo, "run", return_value=""), \
+                patch.object(agent, "read_arm", return_value={
+                    "properties": {"provisioningState": "Failed"},
+                }), self.assertRaisesRegex(RuntimeError, "Failed"):
+            agent.patch({"incidentManagementConfiguration": {"type": "AzMonitor"}})
+
+    def test_arm_patch_timeout_retains_an_explicit_failure(self):
+        agent = demo.Agent.__new__(demo.Agent)
+        agent.arm_url = "https://management.azure.com/example"
+        with patch.object(demo, "run", return_value=""), \
+                patch.object(agent, "read_arm", return_value={
+                    "properties": {"provisioningState": "InProgress"},
+                }), patch.object(demo.time, "monotonic", side_effect=[0, 301]), \
+                self.assertRaisesRegex(RuntimeError, "retain the change ledger"):
+            agent.patch({"incidentManagementConfiguration": {"type": "AzMonitor"}})
+
+    def test_service_now_without_restoration_credentials_blocks_all_writes(self):
+        self.agent.arm["properties"]["incidentManagementConfiguration"]["apiConnectionName"] = ""
+        demo.write_json(self.state / "baseline.json", baseline(self.agent))
+        with self.assertRaisesRegex(ValueError, "no restorable credential"):
+            self.configure()
+        self.assertEqual(self.agent.mutations, [])
+        self.assertFalse((self.state / "changes.json").exists())
 
     def test_exact_agent_id_required(self):
         for invalid in ("", "existing", AGENT_ID + "/children", "https://example.test"):

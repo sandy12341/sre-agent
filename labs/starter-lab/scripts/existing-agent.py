@@ -163,12 +163,22 @@ class Agent:
         return az_json("rest", "--method", "GET", "--url", self.arm_url)
 
     def patch(self, properties):
-        az_json("rest", "--method", "PATCH", "--url", self.arm_url,
-                "--body", json.dumps({"properties": properties}))
-        self.arm = self.read_arm()
-        for key, expected in properties.items():
-            if not matches(expected, self.arm["properties"].get(key)):
-                raise RuntimeError(f"Agent ARM update not verified: {key}")
+        run("az", "rest", "--method", "PATCH", "--url", self.arm_url,
+            "--body", json.dumps({"properties": properties}), "--output", "none")
+        deadline = time.monotonic() + 300
+        while True:
+            self.arm = self.read_arm()
+            state = self.arm["properties"].get("provisioningState")
+            if state in ("Failed", "Canceled", "Cancelled"):
+                raise RuntimeError(f"Agent ARM update failed: {state}")
+            if state == "Succeeded" and all(
+                matches(expected, self.arm["properties"].get(key))
+                for key, expected in properties.items()
+            ):
+                return
+            if time.monotonic() >= deadline:
+                raise RuntimeError("Agent ARM update not verified within 300 seconds; retain the change ledger.")
+            time.sleep(5)
 
     def request(self, method, path, body=None):
         if not path.startswith("/api/") or "://" in path:
@@ -404,6 +414,13 @@ def configure(agent, values, directory, approve, switch_platform):
     prior_platform = incident_configuration(prior_platform)
     if prior_platform.get("type") != "AzMonitor" and not switch_platform:
         raise ValueError("Existing incident platform is not Azure Monitor; explicit temporary-switch approval is required.")
+    if prior_platform.get("type") == "ServiceNow" and not (
+        prior_platform.get("apiConnectionName") or prior_platform.get("connectionKey")
+    ):
+        raise ValueError(
+            "ServiceNow baseline has no restorable credential or API Connection reference. "
+            "Verify restoration through the trusted portal before switching platforms."
+        )
     ledger = {"agentId": agent.id, "objects": [], "platformBefore": prior_platform,
               "platformAfter": None, "managedBefore": None, "managedAfter": None}
     write_json(ledger_path, ledger)

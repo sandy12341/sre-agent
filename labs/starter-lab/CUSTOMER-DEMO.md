@@ -52,6 +52,12 @@ contains environment metadata and a redacted configuration snapshot, not tokens.
 Keep it through cleanup. Inventory fails explicitly if required APIs cannot be
 read. Never overwrite an earlier baseline to disguise configuration drift.
 The snapshot is not a full service backup or a credential export.
+In particular, ARM can return empty ServiceNow credential fields even for an
+existing configuration. Do not switch platforms unless a usable restoration
+reference is present and restoration has been verified. A snapshot of the
+ServiceNow URL/name alone cannot restore its credentials. If restoration fails,
+stop configuration and reconnect through the trusted agent portal; never place
+credentials in the public repository or chat.
 
 Inventory includes global tool policy, existing integrations/configuration,
 both runtime identities' role assignments, managed resources, mode and incident
