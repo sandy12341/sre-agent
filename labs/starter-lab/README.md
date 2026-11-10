@@ -6,6 +6,17 @@ Deploy an Azure SRE Agent, break a sample app, and watch it diagnose and fix the
 to keep that agent intact and deploy Grubify into a separate disposable resource
 group. The steps below are the original **new-agent** path.
 
+For an already prepared customer-demo environment, the presenter entry point is:
+
+```powershell
+python .\scripts\existing-agent.py demo --state-dir $State --approve-probe --approve-fault
+```
+
+It shows healthy cart operations, real failures, the new Azure Monitor alert,
+the automatic SRE investigation and its actual diagnosis. It pauses for browser
+demonstration and stops before remediation. See the [presenter flow and approval
+boundaries](CUSTOMER-DEMO.md#customer-facing-demo-failure-to-diagnosis).
+
 ## Architecture
 
 <p align="center">

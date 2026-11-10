@@ -33,6 +33,7 @@ jobs:
           cd labs/starter-lab
           for script in scripts/*.sh tests/*.sh; do bash -n "$script"; done
           bash tests/setup.tests.sh
+          bash scripts/break-app.sh --demo --help
       - name: YAML parsing
         run: python -c "import pathlib,yaml; [yaml.safe_load(p.read_text(encoding='utf-8')) for p in pathlib.Path('labs/starter-lab').rglob('*.yaml')]"
       - name: Compile infrastructure without Azure sign-in

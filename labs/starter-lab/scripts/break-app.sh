@@ -14,6 +14,14 @@
 # =============================================================================
 set -e
 
+# The customer-demo path follows real alert delivery and diagnosis, not this
+# original new-agent load-only walkthrough.
+if [ "${1:-}" = "--demo" ]; then
+  shift
+  SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+  exec "${PYTHON:-python}" "$SCRIPT_DIR/existing-agent.py" demo "$@"
+fi
+
 # Configuration
 REQUEST_COUNT=${2:-200}
 SLEEP_INTERVAL=${3:-0.5}

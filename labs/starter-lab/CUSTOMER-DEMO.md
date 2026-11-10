@@ -4,6 +4,50 @@ This path reuses an existing agent and deploys **only the Grubify workload** int
 a separate disposable resource group. It does not own, replace, or delete the
 agent, its identity, or its existing integrations.
 
+## Customer-facing demo: failure to diagnosis
+
+After the one-time setup below, run this from the Starter lab folder:
+
+```powershell
+python .\scripts\existing-agent.py demo --state-dir $State `
+  --approve-probe --approve-fault --requests 150 --interval 0.5
+```
+
+This is the presenter command, not another setup checklist. It pauses so you can
+show the app and SRE portal side by side, then displays five observed stages:
+
+1. **Healthy:** three actual Add to Cart operations succeed.
+2. **Failure:** bounded cart POSTs display real HTTP statuses and stop at six
+   server errors. The three healthy operations count inside the 150-request cap.
+3. **Detection:** wait for a new Azure Monitor alert for this API/rule after this
+   run's fault began. An old alert is not accepted as a fresh result.
+4. **SRE at work:** correlate that alert instance to its automatic SRE incident
+   and stream actual agent/tool progress. No manual investigation is silently
+   created as a substitute for detection.
+5. **Diagnosis:** show the agent's completed response only after fresh tool
+   activity and server-confirmed investigation completion.
+
+The command prints browser links and the matching incident title/thread ID.
+No prepared root-cause text is substituted for the agent response. Hidden
+reasoning is not displayed or retained in the private run record.
+The cart may remain failing at the end: this flow never restarts, remediates,
+approves agent actions or publishes GitHub content.
+
+Each alert/incident/diagnosis observation stage has a bounded wait (default
+`--wait-seconds 600`; allowed 60-1200). Ingestion/evaluation delays are displayed
+as waiting, not reported as success. Missing errors, missing routing, pending
+approval or an incomplete diagnosis stop the run explicitly. Ctrl+C stops load
+or the watcher; an already-started server investigation can continue.
+An existing Fired alert blocks a new run until separately approved recovery and
+alert resolution establish a clean baseline.
+
+For an already approved automated rehearsal, add `--non-interactive` to suppress
+presenter pauses. Each run keeps its timestamps, observed traffic counts,
+alert/incident correlation and visible diagnosis in a private `demo-run-*.json`
+under `$State`, never in Git. For Git Bash, the same flow is exposed by
+`bash scripts/break-app.sh --demo --state-dir "$State" --approve-probe --approve-fault`.
+The original URL-only `break-app.sh` mode is not the existing-agent customer flow.
+
 The original [new-agent lab](README.md) remains available. Do not use
 `scripts/setup.sh` for this reuse path: it is the original whole-agent setup.
 
@@ -189,6 +233,10 @@ Select the namespaced `starter-<environment>-...` agents, not unrelated agents.
 Every write remains subject to Review-mode approval and live policy validation.
 
 ### Scenario 1: Operations investigation and recovery
+
+Use the guided `demo` command above for the customer presentation. The individual
+primitives below are for separately approved operator troubleshooting/recovery;
+running load by itself is not a failure-to-diagnosis demonstration.
 
 ```powershell
 python .\scripts\existing-agent.py probe --approve-probe

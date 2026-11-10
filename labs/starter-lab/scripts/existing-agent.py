@@ -4,6 +4,7 @@
 import argparse
 import base64
 import copy
+from datetime import datetime, timezone
 import json
 from pathlib import Path
 import re
@@ -717,6 +718,7 @@ def probe(values, approve):
                 for item in cart.get("items", [])
             ):
                 raise ValueError("Add to Cart returned an unexpected business result.")
+        print(f"Healthy cart operation {attempt + 1}/3: HTTP 200, item present.", flush=True)
         if attempt < 2:
             time.sleep(2)
     print("Three consecutive Add to Cart operations succeeded. Alert resolution must be checked separately.")
@@ -733,11 +735,13 @@ def fault(values, approve, count, interval):
         try:
             with urlopen(request, timeout=5) as response:
                 response.read()
+                print(f"Cart load {index + 1}/{count}: HTTP {response.status}", flush=True)
         except HTTPError as error:
             if error.code < 500:
                 raise
             failures += 1
-            print(f"Observed HTTP {error.code} at request {index + 1}", file=sys.stderr)
+            print(f"FAILURE: HTTP {error.code} at request {index + 1} "
+                  f"({failures}/6 server errors).", flush=True)
         except URLError as error:
             raise RuntimeError(f"Fault run stopped on network failure: {error.reason}") from error
         if failures >= 6:
@@ -746,6 +750,235 @@ def fault(values, approve, count, interval):
             time.sleep(interval)
     print(f"Bounded load finished; observed {failures} server errors. "
           "Check memory, business failures, and alert state; load alone is not proof of an incident.")
+    return {"requests": index + 1, "failures": failures}
+
+
+def demo_timestamp(value):
+    if not isinstance(value, str):
+        raise ValueError("A service event is missing its UTC timestamp.")
+    stamp = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    if stamp.tzinfo is None:
+        raise ValueError("A service event timestamp has no timezone.")
+    return stamp.astimezone(timezone.utc)
+
+
+def demo_alerts(values):
+    scope = f"/subscriptions/{required(values, 'AZURE_SUBSCRIPTION_ID')}/resourceGroups/{required(values, 'AZURE_RESOURCE_GROUP')}"
+    page = az_json("rest", "--method", "GET", "--url",
+                   f"https://management.azure.com{scope}/providers/Microsoft.AlertsManagement/alerts?api-version=2019-03-01")
+    if isinstance(page, dict) and page.get("nextLink"):
+        raise ValueError("Demo alert inventory is paginated; inspect the full inventory before continuing.")
+    return items(page)
+
+
+def demo_alert_matches(alert, rule_id, target_id):
+    essentials = alert.get("properties", {}).get("essentials", {})
+    return (
+        str(essentials.get("alertRule", "")).lower() == rule_id.lower()
+        and str(essentials.get("targetResource", "")).lower() == target_id.lower()
+    )
+
+
+def new_demo_alert(alerts, rule_id, target_id, started):
+    for alert in alerts:
+        if demo_alert_matches(alert, rule_id, target_id) and demo_timestamp(
+            alert["properties"]["essentials"].get("startDateTime")
+        ) >= started:
+            return alert
+    return None
+
+
+def correlated_demo_thread(threads, alert, rule_id, started):
+    alert_id = alert["id"].rstrip("/").rsplit("/", 1)[-1].lower()
+    for thread in threads:
+        source = thread.get("incidentSource") or {}
+        status = (thread.get("status") or {}).get("incidentStatus") or {}
+        details = thread.get("incidentDetails") or {}
+        if (
+            thread.get("source") == "Incident"
+            and source.get("incidentType") == "AzMonitor"
+            and str(source.get("incidentId", "")).lower() == rule_id.lower()
+            and str(status.get("incidentId", "")).lower() == alert_id
+            and demo_timestamp(details.get("incidentCreatedTime")) >= started
+        ):
+            return thread
+    return None
+
+
+def wait_for_demo(label, observe, seconds):
+    deadline = time.monotonic() + seconds
+    while True:
+        result = observe()
+        if result is not None:
+            return result
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise RuntimeError(f"Timed out waiting for {label}. No successful handoff/diagnosis is claimed.")
+        print(f"Waiting for {label} ({max(0, int(seconds - remaining))}s elapsed)...", flush=True)
+        time.sleep(min(5, remaining))
+
+
+def visible_demo_message(message, started):
+    return (
+        str((message.get("author") or {}).get("role", "")).lower() in ("sreagent", "assistant")
+        and str(message.get("messageType", "")).lower() != "reasoning"
+        and message.get("isComplete") is True
+        and demo_timestamp(message.get("timeStamp")) >= started
+    )
+
+
+def present_demo(agent, values, directory, args):
+    if not args.approve_probe or not args.approve_fault:
+        raise ValueError("Demo requires --approve-probe and --approve-fault; no traffic was sent.")
+    if not 9 <= args.requests <= 150 or not 0.5 <= args.interval <= 5 or not 60 <= args.wait_seconds <= 1200:
+        raise ValueError("Demo bounds: 9-150 total cart POSTs, 0.5-5s fault interval, 60-1200s per observation stage.")
+    subscription, group, environment = validate_owned_workload(values)
+    if agent.id.lower() != required(values, "EXISTING_SRE_AGENT_RESOURCE_ID").lower():
+        raise ValueError("Demo targets a different agent.")
+    properties = agent.read_arm()["properties"]
+    if properties["actionConfiguration"]["mode"].lower() != "review" or properties[
+        "incidentManagementConfiguration"
+    ]["type"] != "AzMonitor":
+        raise ValueError("Demo requires existing Review mode and Azure Monitor; it will not change settings.")
+    generated = dict(generated_objects(values))
+    for kind, suffix in (("filters", "http-errors"), ("tasks", "triage")):
+        path = f"{COLLECTIONS[kind]}/starter-{environment}-{suffix}"
+        if not object_matches(generated[path], agent.request("GET", path)):
+            raise ValueError("Demo response plan or Paused triage task differs from the approved configuration.")
+    scope = f"/subscriptions/{subscription}/resourceGroups/{group}"
+    rule_id = f"{scope}/providers/Microsoft.Insights/metricAlerts/alert-http-5xx-{environment}"
+    target_id = f"{scope}/providers/Microsoft.App/containerApps/{required(values, 'CONTAINER_APP_NAME')}"
+    rule = az_json("rest", "--method", "GET", "--url",
+                   f"https://management.azure.com{rule_id}?api-version=2018-03-01")["properties"]
+    if not matches({
+        "enabled": True, "windowSize": "PT5M", "evaluationFrequency": "PT1M",
+        "criteria": {"allOf": [{
+            "metricName": "Requests", "operator": "GreaterThan", "threshold": 5,
+            "timeAggregation": "Total", "dimensions": [{
+                "name": "statusCodeCategory", "operator": "Include", "values": ["5xx"],
+            }],
+        }]},
+    }, rule) or [str(item).lower() for item in rule.get("scopes", [])] != [target_id.lower()]:
+        raise ValueError("Expected enabled API-only six-error alert is not configured; no traffic was sent.")
+    if any(demo_alert_matches(alert, rule_id, target_id) and alert["properties"]["essentials"].get(
+        "monitorCondition"
+    ) == "Fired" for alert in demo_alerts(values)):
+        raise ValueError("A previous demo alert is still Fired. Recover separately and wait for it to resolve before a new demo.")
+    agent.collection("/api/v1/threads")
+    started = datetime.now(timezone.utc)
+    path = directory / f"demo-run-{started.strftime('%Y%m%dT%H%M%S%fZ')}.json"
+    record = {"started": started.isoformat(), "status": "running", "maxCartPosts": args.requests,
+              "healthyCartPosts": 0, "fault": None, "events": [], "stage": "ready"}
+    write_json(path, record)
+
+    def pause(message):
+        if not args.non_interactive:
+            try:
+                input(message + " Press Enter to continue (Ctrl+C stops the runner): ")
+            except EOFError as error:
+                raise ValueError("Guided demo needs an interactive terminal; use --non-interactive for an approved rehearsal.") from error
+
+    def stage(number, title):
+        record["stage"] = title
+        write_json(path, record)
+        print(f"\n[{number}/5] {title}", flush=True)
+
+    try:
+        print("\nGRUBIFY CUSTOMER DEMO: healthy app -> real failure -> real SRE diagnosis", flush=True)
+        print(f"App: {required(values, 'FRONTEND_APP_URL')}", flush=True)
+        print(f"Agent: https://portal.azure.com/#resource{agent.id}/overview", flush=True)
+        print(f"Traffic cap: {args.requests} total cart POSTs, including 3 healthy operations. "
+              "No auto-recovery, configuration changes or publications.", flush=True)
+        pause("Open the app and SRE agent portal side by side.")
+        stage(1, "HEALTHY: prove Add to Cart works")
+        record["healthyCartPosts"] = None
+        write_json(path, record)
+        probe(values, True)
+        record["healthyCartPosts"] = 3
+        stage(2, "FAILURE: reproduce the cart problem visibly")
+        pause("Show the healthy app. The next step deliberately breaks cart POSTs.")
+        fault_started = datetime.now(timezone.utc)
+        record["faultStarted"] = fault_started.isoformat()
+        write_json(path, record)
+        record["fault"] = fault(values, True, args.requests - 3, args.interval)
+        write_json(path, record)
+        if record["fault"]["failures"] < 6:
+            raise RuntimeError("Six server errors were not observed within the traffic cap. No demo incident is claimed.")
+        print("Customer-visible failure observed. Load stopped; no extra retries will be sent.", flush=True)
+        pause("Show the failed cart operation. Continue to follow automatic detection.")
+        stage(3, "DETECTION: wait for a NEW Azure Monitor alert")
+        alert = wait_for_demo("a new workload alert", lambda: new_demo_alert(
+            demo_alerts(values), rule_id, target_id, fault_started,
+        ), args.wait_seconds)
+        record["alertId"] = alert["id"]
+        record["alertFired"] = alert["properties"]["essentials"]["startDateTime"]
+        write_json(path, record)
+        print(f"REAL alert: {alert['name']} at {record['alertFired']}", flush=True)
+        stage(4, "SRE AT WORK: follow the automatically correlated investigation")
+        thread = wait_for_demo("the automatic SRE incident for this alert", lambda: correlated_demo_thread(
+            agent.collection("/api/v1/threads"), alert, rule_id, fault_started,
+        ), args.wait_seconds)
+        thread_id = thread["id"]
+        record["threadId"] = thread_id
+        write_json(path, record)
+        print(f"Automatic incident: {thread['title']}\nThread: {thread_id}", flush=True)
+        print("Select this incident in the SRE portal. The feed below is actual agent activity, not a scripted diagnosis.", flush=True)
+        seen = set()
+        evidence = set()
+        execution_keys = ("azCliExecution", "terminalResult", "mcpToolExecution", "pythonExecutionResult")
+        incident_started = demo_timestamp(record["alertFired"])
+
+        def observe_diagnosis():
+            current = agent.request("GET", f"/api/v1/threads/{thread_id}")
+            if not correlated_demo_thread([current], alert, rule_id, fault_started):
+                raise RuntimeError("SRE incident correlation changed; refusing to display an unrelated investigation.")
+            if "approval" in str(current.get("waitReason", "")).lower():
+                raise RuntimeError("SRE is awaiting approval. This diagnosis-only demo does not approve actions.")
+            for message in agent.collection(f"/api/v1/threads/{thread_id}/messages"):
+                if not visible_demo_message(message, incident_started):
+                    continue
+                message_id = message["id"]
+                if message_id in seen:
+                    continue
+                seen.add(message_id)
+                if message.get("approval") or message.get("userQuestion"):
+                    raise RuntimeError("SRE requested operator input/approval; the runner will not answer or approve it.")
+                for key in execution_keys:
+                    execution = message.get(key) or {}
+                    if execution.get("status") == "Completed" and not execution.get("error"):
+                        evidence.add(message_id)
+                text = message.get("text") or ""
+                if text:
+                    print(f"SRE | {text[:1200]}", flush=True)
+                    record["events"].append({"id": message_id, "time": message["timeStamp"], "text": text})
+            write_json(path, record)
+            final = current.get("lastMessage") or {}
+            complete = str((current.get("incidentDetails") or {}).get("investigationStatus", "")).lower()
+            tool_fields = [key for key in final if key.endswith(("Execution", "ExecutionGroup", "Result"))]
+            tool_fields.extend(("approval", "userQuestion", "armQuery", "todoInfo"))
+            if complete in ("complete", "completed") and evidence and visible_demo_message(
+                final, incident_started
+            ) and final.get("text") and not any(final.get(key) for key in tool_fields):
+                return final["text"]
+            return None
+
+        diagnosis = wait_for_demo("completed SRE diagnosis with fresh tool activity", observe_diagnosis, args.wait_seconds)
+        stage(5, "DIAGNOSIS: the SRE agent's reported findings")
+        print(diagnosis, flush=True)
+        record.update(status="diagnosis_complete", diagnosis=diagnosis,
+                      completed=datetime.now(timezone.utc).isoformat(),
+                      completedToolEvents=len(evidence))
+        write_json(path, record)
+        print("\nDEMO COMPLETE: observed failures -> new monitor alert -> automatic SRE investigation -> diagnosis.", flush=True)
+        print("No restart or remediation was requested. The cart may remain failing; recovery requires separate approval.", flush=True)
+        return record
+    except (ValueError, KeyError, RuntimeError, OSError, KeyboardInterrupt) as error:
+        record.update(status="interrupted" if isinstance(error, KeyboardInterrupt) else "failed",
+                      error=str(error), stopped=datetime.now(timezone.utc).isoformat())
+        write_json(path, record)
+        print("Demo stopped without claiming success. No recovery was requested; the app may remain failing "
+              "and an already-started server investigation may continue.", file=sys.stderr, flush=True)
+        raise
 
 
 def seed_issues(approve):
@@ -771,7 +1004,7 @@ def seed_issues(approve):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("command", choices=("inventory", "plan", "configure", "cleanup", "build", "preflight",
-                                           "reset", "probe", "fault", "seed-issues", "verify-sources"))
+                                           "reset", "probe", "fault", "seed-issues", "verify-sources", "demo"))
     parser.add_argument("--agent-id")
     parser.add_argument("--state-dir")
     parser.add_argument("--approve-configuration", action="store_true")
@@ -783,6 +1016,8 @@ def main():
     parser.add_argument("--approve-issues", action="store_true")
     parser.add_argument("--requests", type=int, default=150)
     parser.add_argument("--interval", type=float, default=0.5)
+    parser.add_argument("--wait-seconds", type=int, default=600)
+    parser.add_argument("--non-interactive", action="store_true")
     args = parser.parse_args()
     if args.command == "seed-issues":
         seed_issues(args.approve_issues)
@@ -826,6 +1061,8 @@ def main():
         configure(agent, values, directory, args.approve_configuration, args.allow_platform_switch)
     elif args.command == "verify-sources":
         verify_sources(agent, values)
+    elif args.command == "demo":
+        present_demo(agent, values, directory, args)
     else:
         cleanup(agent, directory, args.approve_cleanup)
 
@@ -833,6 +1070,9 @@ def main():
 if __name__ == "__main__":
     try:
         main()
+    except KeyboardInterrupt:
+        print("Interrupted. No automatic recovery or approval was submitted.", file=sys.stderr)
+        sys.exit(130)
     except (ValueError, KeyError, RuntimeError, OSError, subprocess.TimeoutExpired) as error:
         print(f"ERROR: {error}", file=sys.stderr)
         sys.exit(1)
