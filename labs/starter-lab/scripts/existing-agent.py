@@ -822,13 +822,15 @@ def visible_demo_message(message, started):
     return (
         str((message.get("author") or {}).get("role", "")).lower() in ("sreagent", "assistant")
         and str(message.get("messageType", "")).lower() != "reasoning"
+        and not str(message.get("text", "")).lstrip().startswith("```incident-alert")
         and message.get("isComplete") is True
         and demo_timestamp(message.get("timeStamp")) >= started
     )
 
 
 def present_demo(agent, values, directory, args):
-    if not args.approve_probe or not args.approve_fault:
+    resume = args.command == "watch-demo"
+    if not resume and (not args.approve_probe or not args.approve_fault):
         raise ValueError("Demo requires --approve-probe and --approve-fault; no traffic was sent.")
     if not 9 <= args.requests <= 150 or not 0.5 <= args.interval <= 5 or not 60 <= args.wait_seconds <= 1200:
         raise ValueError("Demo bounds: 9-150 total cart POSTs, 0.5-5s fault interval, 60-1200s per observation stage.")
@@ -860,15 +862,42 @@ def present_demo(agent, values, directory, args):
         }]},
     }, rule) or [str(item).lower() for item in rule.get("scopes", [])] != [target_id.lower()]:
         raise ValueError("Expected enabled API-only six-error alert is not configured; no traffic was sent.")
-    if any(demo_alert_matches(alert, rule_id, target_id) and alert["properties"]["essentials"].get(
+    if not resume and any(demo_alert_matches(alert, rule_id, target_id) and alert["properties"]["essentials"].get(
         "monitorCondition"
     ) == "Fired" for alert in demo_alerts(values)):
         raise ValueError("A previous demo alert is still Fired. Recover separately and wait for it to resolve before a new demo.")
     agent.collection("/api/v1/threads")
     started = datetime.now(timezone.utc)
-    path = directory / f"demo-run-{started.strftime('%Y%m%dT%H%M%S%fZ')}.json"
-    record = {"started": started.isoformat(), "status": "running", "maxCartPosts": args.requests,
-              "healthyCartPosts": 0, "fault": None, "events": [], "stage": "ready"}
+    if resume:
+        filename = args.run_record or ""
+        path = (directory / filename).resolve()
+        if path.parent != directory.resolve() or not filename.startswith("demo-run-") or not filename.endswith(".json"):
+            raise ValueError("watch-demo requires --run-record with a demo-run-*.json filename inside --state-dir.")
+        record = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(record, dict) or not isinstance(record.get("fault"), dict):
+            raise ValueError("Saved run has no bounded fault record; watch-demo will not send traffic.")
+        fault_record = record.get("fault") or {}
+        if not all(type(value) is int for value in (
+            record.get("healthyCartPosts"), record.get("maxCartPosts"),
+            fault_record.get("failures"), fault_record.get("requests"),
+        )):
+            raise ValueError("Saved run has invalid traffic counts; watch-demo will not send traffic.")
+        if (
+            record.get("healthyCartPosts") != 3 or fault_record.get("failures") != 6
+            or not 9 <= record.get("maxCartPosts", 0) <= 150
+            or not 6 <= fault_record.get("requests", 0) <= record["maxCartPosts"] - 3
+        ):
+            raise ValueError("Saved run has no verified bounded six-error fault; watch-demo will not send traffic.")
+        demo_timestamp(record.get("faultStarted"))
+        record.setdefault("watchResumes", []).append({
+            "resumed": started.isoformat(), "priorStatus": record.get("status"),
+            "priorError": record.pop("error", None), "priorStopped": record.pop("stopped", None),
+        })
+        record["status"] = "running"
+    else:
+        path = directory / f"demo-run-{started.strftime('%Y%m%dT%H%M%S%fZ')}.json"
+        record = {"started": started.isoformat(), "status": "running", "maxCartPosts": args.requests,
+                  "healthyCartPosts": 0, "fault": None, "events": [], "stage": "ready"}
     write_json(path, record)
 
     def pause(message):
@@ -887,29 +916,39 @@ def present_demo(agent, values, directory, args):
         print("\nGRUBIFY CUSTOMER DEMO: healthy app -> real failure -> real SRE diagnosis", flush=True)
         print(f"App: {required(values, 'FRONTEND_APP_URL')}", flush=True)
         print(f"Agent: https://portal.azure.com/#resource{agent.id}/overview", flush=True)
-        print(f"Traffic cap: {args.requests} total cart POSTs, including 3 healthy operations. "
-              "No auto-recovery, configuration changes or publications.", flush=True)
-        pause("Open the app and SRE agent portal side by side.")
-        stage(1, "HEALTHY: prove Add to Cart works")
-        record["healthyCartPosts"] = None
-        write_json(path, record)
-        probe(values, True)
-        record["healthyCartPosts"] = 3
-        stage(2, "FAILURE: reproduce the cart problem visibly")
-        pause("Show the healthy app. The next step deliberately breaks cart POSTs.")
-        fault_started = datetime.now(timezone.utc)
-        record["faultStarted"] = fault_started.isoformat()
-        write_json(path, record)
-        record["fault"] = fault(values, True, args.requests - 3, args.interval)
-        write_json(path, record)
-        if record["fault"]["failures"] < 6:
-            raise RuntimeError("Six server errors were not observed within the traffic cap. No demo incident is claimed.")
-        print("Customer-visible failure observed. Load stopped; no extra retries will be sent.", flush=True)
-        pause("Show the failed cart operation. Continue to follow automatic detection.")
-        stage(3, "DETECTION: wait for a NEW Azure Monitor alert")
-        alert = wait_for_demo("a new workload alert", lambda: new_demo_alert(
-            demo_alerts(values), rule_id, target_id, fault_started,
-        ), args.wait_seconds)
+        if resume:
+            print("READ-ONLY RESUME: no healthy probes, fault traffic, approvals or recovery will be sent.", flush=True)
+            fault_started = demo_timestamp(record["faultStarted"])
+        else:
+            print(f"Traffic cap: {args.requests} total cart POSTs, including 3 healthy operations. "
+                  "No auto-recovery, configuration changes or publications.", flush=True)
+            pause("Open the app and SRE agent portal side by side.")
+            stage(1, "HEALTHY: prove Add to Cart works")
+            record["healthyCartPosts"] = None
+            write_json(path, record)
+            probe(values, True)
+            record["healthyCartPosts"] = 3
+            stage(2, "FAILURE: reproduce the cart problem visibly")
+            pause("Show the healthy app. The next step deliberately breaks cart POSTs.")
+            fault_started = datetime.now(timezone.utc)
+            record["faultStarted"] = fault_started.isoformat()
+            write_json(path, record)
+            record["fault"] = fault(values, True, args.requests - 3, args.interval)
+            write_json(path, record)
+            if record["fault"]["failures"] < 6:
+                raise RuntimeError("Six server errors were not observed within the traffic cap. No demo incident is claimed.")
+            print("Customer-visible failure observed. Load stopped; no extra retries will be sent.", flush=True)
+            pause("Show the failed cart operation. Continue to follow automatic detection.")
+        stage(3, "DETECTION: verify this run's Azure Monitor alert" if resume
+              else "DETECTION: wait for a NEW Azure Monitor alert")
+
+        def observe_alert():
+            candidates = demo_alerts(values)
+            if resume and record.get("alertId"):
+                candidates = [item for item in candidates if item["id"].lower() == record["alertId"].lower()]
+            return new_demo_alert(candidates, rule_id, target_id, fault_started)
+
+        alert = wait_for_demo("this run's workload alert", observe_alert, args.wait_seconds)
         record["alertId"] = alert["id"]
         record["alertFired"] = alert["properties"]["essentials"]["startDateTime"]
         write_json(path, record)
@@ -923,7 +962,7 @@ def present_demo(agent, values, directory, args):
         write_json(path, record)
         print(f"Automatic incident: {thread['title']}\nThread: {thread_id}", flush=True)
         print("Select this incident in the SRE portal. The feed below is actual agent activity, not a scripted diagnosis.", flush=True)
-        seen = set()
+        seen = {event["id"] for event in record["events"]}
         evidence = set()
         execution_keys = ("azCliExecution", "terminalResult", "mcpToolExecution", "pythonExecutionResult")
         incident_started = demo_timestamp(record["alertFired"])
@@ -938,18 +977,18 @@ def present_demo(agent, values, directory, args):
                 if not visible_demo_message(message, incident_started):
                     continue
                 message_id = message["id"]
-                if message_id in seen:
-                    continue
-                seen.add(message_id)
                 if message.get("approval") or message.get("userQuestion"):
                     raise RuntimeError("SRE requested operator input/approval; the runner will not answer or approve it.")
                 for key in execution_keys:
                     execution = message.get(key) or {}
                     if execution.get("status") == "Completed" and not execution.get("error"):
                         evidence.add(message_id)
+                if message_id in seen:
+                    continue
+                seen.add(message_id)
                 text = message.get("text") or ""
                 if text:
-                    print(f"SRE | {text[:1200]}", flush=True)
+                    print(f"SRE {message['timeStamp']} | {text[:1200]}", flush=True)
                     record["events"].append({"id": message_id, "time": message["timeStamp"], "text": text})
             write_json(path, record)
             final = current.get("lastMessage") or {}
@@ -1002,9 +1041,10 @@ def seed_issues(approve):
 
 
 def main():
+    configure_console()
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("command", choices=("inventory", "plan", "configure", "cleanup", "build", "preflight",
-                                           "reset", "probe", "fault", "seed-issues", "verify-sources", "demo"))
+                                           "reset", "probe", "fault", "seed-issues", "verify-sources", "demo", "watch-demo"))
     parser.add_argument("--agent-id")
     parser.add_argument("--state-dir")
     parser.add_argument("--approve-configuration", action="store_true")
@@ -1018,6 +1058,7 @@ def main():
     parser.add_argument("--interval", type=float, default=0.5)
     parser.add_argument("--wait-seconds", type=int, default=600)
     parser.add_argument("--non-interactive", action="store_true")
+    parser.add_argument("--run-record")
     args = parser.parse_args()
     if args.command == "seed-issues":
         seed_issues(args.approve_issues)
@@ -1061,10 +1102,16 @@ def main():
         configure(agent, values, directory, args.approve_configuration, args.allow_platform_switch)
     elif args.command == "verify-sources":
         verify_sources(agent, values)
-    elif args.command == "demo":
+    elif args.command in ("demo", "watch-demo"):
         present_demo(agent, values, directory, args)
     else:
         cleanup(agent, directory, args.approve_cleanup)
+
+
+def configure_console():
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(encoding="utf-8", errors="backslashreplace")
 
 
 if __name__ == "__main__":

@@ -48,6 +48,19 @@ under `$State`, never in Git. For Git Bash, the same flow is exposed by
 `bash scripts/break-app.sh --demo --state-dir "$State" --approve-probe --approve-fault`.
 The original URL-only `break-app.sh` mode is not the existing-agent customer flow.
 
+If the terminal/watcher is interrupted after the six errors, resume **read-only**
+instead of running the fault again:
+
+```powershell
+python .\scripts\existing-agent.py watch-demo --state-dir $State `
+  --run-record '<demo-run-filename.json>' --non-interactive
+```
+
+Use the existing run filename under `$State`. This sends no cart requests and
+accepts only that run's real alert/automatic incident. Earlier watcher errors
+are retained in its resume history. The CLI uses UTF-8 for actual SRE responses,
+including Unicode tool-status messages on Windows.
+
 The original [new-agent lab](README.md) remains available. Do not use
 `scripts/setup.sh` for this reuse path: it is the original whole-agent setup.
 

@@ -45,13 +45,14 @@ class PresenterTests(unittest.TestCase):
         self.values = {**VALUES, "CONTAINER_APP_NAME": "api", "FRONTEND_APP_URL": "https://frontend.test"}
         self.args = demo.argparse.Namespace(
             approve_probe=True, approve_fault=True, requests=150, interval=0.5,
-            wait_seconds=60, non_interactive=False,
+            wait_seconds=60, non_interactive=False, command="demo", run_record=None,
         )
         self.agent = FakeAgent()
         self.agent.arm["properties"]["incidentManagementConfiguration"] = {"type": "AzMonitor"}
         self.generated = dict(demo.generated_objects(self.values))
         self.messages = [
             message("reasoning", "HIDDEN_REASONING", messageType="Reasoning"),
+            message("alert-envelope", "```incident-alert\nPRIVATE_ALERT_METADATA\n```"),
             message("query", "Querying actual workload logs", azCliExecution={"status": "Completed", "error": None}),
             thread()["lastMessage"],
         ]
@@ -101,6 +102,7 @@ class PresenterTests(unittest.TestCase):
                          "OutOfMemoryException", "https://frontend.test", "https://portal.azure.com/"):
             self.assertIn(expected, output)
         self.assertNotIn("HIDDEN_REASONING", output)
+        self.assertNotIn("PRIVATE_ALERT_METADATA", output)
         record = json.loads(next(self.state.glob("demo-run-*.json")).read_text())
         self.assertNotIn("HIDDEN_REASONING", json.dumps(record))
         self.assertEqual(record["maxCartPosts"], 150)
@@ -111,6 +113,51 @@ class PresenterTests(unittest.TestCase):
         self.args.non_interactive = True
         self.run_demo()
         self.prompt.assert_not_called()
+
+    def test_read_only_watch_resumes_existing_run_without_any_cart_traffic(self):
+        self.args.command = "watch-demo"
+        self.args.approve_probe = self.args.approve_fault = False
+        self.args.run_record = "demo-run-existing.json"
+        demo.write_json(self.state / self.args.run_record, {
+            "started": START.isoformat(), "faultStarted": START.isoformat(), "status": "failed",
+            "error": "previous console encoding error", "maxCartPosts": 150, "healthyCartPosts": 3,
+            "fault": {"requests": 72, "failures": 6}, "alertId": alert()["id"],
+            "events": [{"id": "query", "time": "2026-11-10T00:00:02Z", "text": "Querying actual workload logs"}],
+        })
+        self.alerts.side_effect = None
+        self.alerts.return_value = [alert()]
+        result = self.run_demo()
+        self.assertEqual(result["status"], "diagnosis_complete")
+        self.assertEqual(result["fault"]["requests"], 72)
+        self.assertEqual(result["completedToolEvents"], 1)
+        self.assertEqual(result["watchResumes"][0]["priorStatus"], "failed")
+        self.probe.assert_not_called()
+        self.fault.assert_not_called()
+        self.reset.assert_not_called()
+        self.prompt.assert_not_called()
+        self.assertIn("READ-ONLY RESUME", self.output.getvalue())
+
+    def test_watch_rejects_outside_state_paths_and_unverified_traffic(self):
+        self.args.command = "watch-demo"
+        self.args.run_record = "../demo-run-outside.json"
+        with self.assertRaisesRegex(ValueError, "inside --state-dir"):
+            self.run_demo()
+        self.args.run_record = "demo-run-invalid.json"
+        demo.write_json(self.state / self.args.run_record, {"fault": None})
+        with self.assertRaisesRegex(ValueError, "no bounded fault"):
+            self.run_demo()
+        self.probe.assert_not_called()
+        self.fault.assert_not_called()
+
+    def test_console_handles_actual_sre_unicode_on_windows_encodings(self):
+        raw = io.BytesIO()
+        console = io.TextIOWrapper(raw, encoding="cp1252")
+        with patch.object(demo.sys, "stdout", console):
+            demo.configure_console()
+            print("\u2705 diagnosis \u2014 evidence")
+            console.flush()
+        self.assertIn("\u2705 diagnosis".encode("utf-8"), raw.getvalue())
+        console.detach()
 
     def test_approval_and_budget_are_checked_before_traffic(self):
         for update in ({"approve_fault": False}, {"approve_probe": False}, {"requests": 151},
