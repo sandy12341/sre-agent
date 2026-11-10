@@ -31,6 +31,15 @@ image builds use ACR Tasks. Verify tools before installing dependencies.
 
 PowerShell examples below use placeholders; do not put credentials in commands.
 
+On Windows, Git Bash must be on the PATH inherited by azd lifecycle hooks, not
+just available through an absolute-path invocation. If needed, add the installed
+Git Bash directory to the current PowerShell process before validation/deploy:
+
+```powershell
+$env:PATH = 'C:\Program Files\Git\bin;' + $env:PATH
+bash --version
+```
+
 ```powershell
 $Subscription = '<approved-subscription-id>'
 $AgentId = "/subscriptions/$Subscription/resourceGroups/SRE-Demo/providers/Microsoft.App/agents/<existing-agent-name>"
