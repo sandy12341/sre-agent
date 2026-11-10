@@ -58,10 +58,22 @@ reference is present and restoration has been verified. A snapshot of the
 ServiceNow URL/name alone cannot restore its credentials. If restoration fails,
 stop configuration and reconnect through the trusted agent portal; never place
 credentials in the public repository or chat.
+If the operator explicitly defers ServiceNow restoration and elects to keep
+Azure Monitor, capture that approved state in a separate baseline directory.
+Keep the original baseline and failed-restoration ledger. Cleanup against the
+new baseline restores the Azure Monitor demo state, not the original ServiceNow
+connection; the deferred reconnection remains an operator action.
 
 Inventory includes global tool policy, existing integrations/configuration,
 both runtime identities' role assignments, managed resources, mode and incident
 platform. Identify other users of the agent before changing global settings.
+
+The service represents a disabled recurring task as `status: Paused`, not
+`isEnabled: false`. Readback verifies that status. Knowledge uploads are verified
+using returned filename, content type and byte count because file contents are
+write-only. Some service upload/delete calls return HTTP 405 after persisting
+the operation; the helper reports this explicitly and requires exact metadata
+or verified absence before continuing. This is not proof of knowledge indexing.
 
 ## 2. Configure a separate workload environment
 

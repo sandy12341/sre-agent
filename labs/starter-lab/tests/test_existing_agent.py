@@ -69,7 +69,15 @@ class FakeAgent:
             return copy.deepcopy(current)
         self.mutations.append((method, path))
         if method == "PUT":
-            self.collections[route].append(copy.deepcopy(body))
+            stored = copy.deepcopy(body)
+            if stored.get("type") == "ExtendedAgent" and stored.get("owner") == "":
+                stored.pop("owner")
+            if stored.get("properties", {}).get("dataConnectorType") == "KnowledgeFile":
+                stored["tags"] = None
+                metadata = stored["properties"]["extendedProperties"]
+                metadata["metadata.uploadedFilename"] = metadata.pop("fileName")
+                metadata["fileSize"] = len(demo.base64.b64decode(metadata.pop("fileContent")))
+            self.collections[route].append(stored)
         elif method == "DELETE":
             self.collections[route].remove(current)
         return {}
@@ -145,6 +153,116 @@ class ExistingAgentTests(unittest.TestCase):
             self.configure()
         self.assertEqual(self.agent.mutations, [])
         self.assertFalse((self.state / "changes.json").exists())
+
+    def test_knowledge_readback_verifies_upload_metadata_not_write_only_content(self):
+        body = demo.generated_objects(VALUES)[0][1]
+        actual = copy.deepcopy(body)
+        actual["tags"] = None
+        metadata = actual["properties"]["extendedProperties"]
+        metadata["metadata.uploadedFilename"] = metadata.pop("fileName")
+        metadata["fileSize"] = len(demo.base64.b64decode(metadata.pop("fileContent")))
+        self.assertTrue(demo.object_matches(body, actual))
+        metadata["fileSize"] += 1
+        self.assertFalse(demo.object_matches(body, actual))
+        metadata["fileSize"] -= 1
+        metadata["metadata.uploadedFilename"] = "different.md"
+        self.assertFalse(demo.object_matches(body, actual))
+
+    def test_only_empty_subagent_owner_can_be_omitted_by_service(self):
+        body = {"name": "demo", "type": "ExtendedAgent", "owner": "", "properties": {}}
+        actual = {key: value for key, value in body.items() if key != "owner"}
+        self.assertTrue(demo.object_matches(body, actual))
+        body["owner"] = "nonempty-owner"
+        self.assertFalse(demo.object_matches(body, actual))
+
+    def test_owned_repo_allows_clone_lifecycle_but_not_source_changes(self):
+        applied = {
+            "type": "CodeRepo", "properties": {
+                "url": "https://github.com/example/demo", "branch": "demo",
+                "cloneStatus": "Cloning", "localPath": None, "latestCommit": None,
+            },
+        }
+        current = copy.deepcopy(applied)
+        current["properties"].update({
+            "cloneStatus": "Ready", "localPath": "service-generated",
+            "latestCommit": demo.MANIFEST["applicationCommit"],
+            "lastSuccessfulSync": "service-generated", "errorMessage": "",
+        })
+        self.assertTrue(demo.unchanged_owned_object(applied, current))
+        current["properties"]["latestCommit"] = "different-commit"
+        self.assertFalse(demo.unchanged_owned_object(applied, current))
+        current["properties"]["latestCommit"] = demo.MANIFEST["applicationCommit"]
+        current["properties"]["branch"] = "different-branch"
+        self.assertFalse(demo.unchanged_owned_object(applied, current))
+
+    def test_knowledge_405_requires_verified_persisted_upload(self):
+        original_request = self.agent.request
+
+        def request(method, path, body=None):
+            result = original_request(method, path, body)
+            if method == "PUT" and body.get("properties", {}).get("dataConnectorType") == "KnowledgeFile":
+                raise RuntimeError("Knowledge upload returned HTTP 405") from demo.HTTPError(
+                    path, 405, "Method Not Allowed", {}, None,
+                )
+            return result
+
+        with patch.object(self.agent, "request", side_effect=request), \
+                patch.object(demo.sys.stderr, "write") as warning:
+            self.configure()
+        self.assertTrue(any("WARNING:" in call.args[0] for call in warning.call_args_list))
+        ledger = json.loads((self.state / "changes.json").read_text())
+        self.assertTrue(all(entry["applied"] is not None for entry in ledger["objects"]))
+
+    def test_knowledge_405_cannot_hide_a_mismatched_upload(self):
+        original_request = self.agent.request
+
+        def request(method, path, body=None):
+            result = original_request(method, path, body)
+            if method == "PUT" and body.get("properties", {}).get("dataConnectorType") == "KnowledgeFile":
+                self.agent.collections[demo.COLLECTIONS["connectors"]][-1]["properties"]["extendedProperties"]["fileSize"] += 1
+                raise RuntimeError("Knowledge upload returned HTTP 405") from demo.HTTPError(
+                    path, 405, "Method Not Allowed", {}, None,
+                )
+            return result
+
+        with patch.object(self.agent, "request", side_effect=request), \
+                patch.object(demo.sys.stderr, "write"), \
+                self.assertRaisesRegex(RuntimeError, "Configuration verification failed"):
+            self.configure()
+
+    def test_knowledge_delete_405_requires_verified_absence(self):
+        self.configure()
+        original_request = self.agent.request
+
+        def request(method, path, body=None):
+            result = original_request(method, path, body)
+            if method == "DELETE" and path.startswith(demo.COLLECTIONS["connectors"] + "/"):
+                raise RuntimeError("Knowledge delete returned HTTP 405") from demo.HTTPError(
+                    path, 405, "Method Not Allowed", {}, None,
+                )
+            return result
+
+        with patch.object(self.agent, "request", side_effect=request), \
+                patch.object(demo.sys.stderr, "write") as warning:
+            demo.cleanup(self.agent, self.state, True)
+        self.assertTrue(any("WARNING:" in call.args[0] for call in warning.call_args_list))
+        self.assertTrue(json.loads((self.state / "changes.json").read_text())["cleanupVerified"])
+
+    def test_knowledge_delete_405_cannot_hide_a_remaining_object(self):
+        self.configure()
+        original_request = self.agent.request
+
+        def request(method, path, body=None):
+            if method == "DELETE" and path.startswith(demo.COLLECTIONS["connectors"] + "/"):
+                raise RuntimeError("Knowledge delete returned HTTP 405") from demo.HTTPError(
+                    path, 405, "Method Not Allowed", {}, None,
+                )
+            return original_request(method, path, body)
+
+        with patch.object(self.agent, "request", side_effect=request), \
+                patch.object(demo.sys.stderr, "write"), \
+                self.assertRaisesRegex(RuntimeError, "Deletion not yet verified"):
+            demo.cleanup(self.agent, self.state, True)
 
     def test_exact_agent_id_required(self):
         for invalid in ("", "existing", AGENT_ID + "/children", "https://example.test"):
@@ -226,7 +344,8 @@ class ExistingAgentTests(unittest.TestCase):
                 self.assertEqual(body["properties"]["agentMode"], "Review")
                 self.assertEqual(body["properties"]["titleContains"], "alert-http-5xx-starter-demo")
             if route.startswith(demo.COLLECTIONS["tasks"] + "/"):
-                self.assertFalse(body["properties"]["isEnabled"])
+                self.assertEqual(body["properties"]["status"], "Paused")
+                self.assertNotIn("isEnabled", body["properties"])
                 self.assertEqual(body["properties"]["agentMode"], "Review")
 
     def test_configuration_requires_explicit_approval(self):
@@ -260,7 +379,7 @@ class ExistingAgentTests(unittest.TestCase):
         self.assertEqual(self.agent.mutations, [])
 
     def test_setup_cleanup_restores_platform_and_preserves_existing_objects(self):
-        existing_task = {"name": "existing-task", "properties": {"isEnabled": True}}
+        existing_task = {"name": "existing-task", "properties": {"status": "Active"}}
         self.agent.collections[demo.COLLECTIONS["tasks"]].append(existing_task)
         demo.write_json(self.state / "baseline.json", baseline(self.agent))
         self.configure()
@@ -275,7 +394,7 @@ class ExistingAgentTests(unittest.TestCase):
     def test_cleanup_refuses_to_delete_externally_modified_objects(self):
         self.configure()
         task = self.agent.collections[demo.COLLECTIONS["tasks"]][0]
-        task["properties"]["isEnabled"] = True
+        task["properties"]["status"] = "Active"
         with self.assertRaisesRegex(ValueError, "changed after setup"):
             demo.cleanup(self.agent, self.state, True)
 

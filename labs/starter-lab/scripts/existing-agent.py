@@ -346,9 +346,9 @@ def generated_objects(values):
     task_name = prefix + "-triage"
     objects.append((COLLECTIONS["tasks"] + "/" + task_name, {
         "name": task_name, "type": "ScheduledTask", "tags": [], "properties": {
-            "name": task_name, "description": "On-demand Starter issue triage; recurring execution disabled",
+            "description": "On-demand Starter issue triage; recurring execution disabled",
             "cronExpression": "0 */12 * * *", "agent": prefix + "-issue-triager",
-            "agentMode": "Review", "isEnabled": False,
+            "agentMode": "Review", "status": "Paused",
             "agentPrompt": (
                 f"Triage only {MANIFEST['issueMarker']} [Customer Issue] records in "
                 f"{MANIFEST['applicationRepository']}. Skip already triaged issues and request approval for writes."
@@ -368,6 +368,37 @@ def matches(expected, actual):
             matches(left, right) for left, right in zip(expected, actual)
         )
     return expected == actual
+
+
+def object_matches(expected, actual):
+    expected = copy.deepcopy(expected)
+    if expected.get("type") == "ExtendedAgent" and expected.get("owner") == "" and "owner" not in actual:
+        expected.pop("owner")
+    if expected.get("tags") == [] and actual.get("tags") is None:
+        expected["tags"] = None
+    properties = expected.get("properties", {})
+    if properties.get("dataConnectorType") == "KnowledgeFile":
+        metadata = properties["extendedProperties"]
+        returned = actual.get("properties", {}).get("extendedProperties", {})
+        content = metadata.pop("fileContent", None)
+        if content and content != "[REDACTED]":
+            metadata["fileSize"] = len(base64.b64decode(content, validate=True))
+        if "fileName" in metadata and "fileName" not in returned:
+            metadata["metadata.uploadedFilename"] = metadata.pop("fileName")
+    return matches(expected, actual)
+
+
+def unchanged_owned_object(applied, current):
+    applied, current = copy.deepcopy(applied), copy.deepcopy(current)
+    if applied.get("type") == current.get("type") == "CodeRepo":
+        before, after = applied["properties"], current["properties"]
+        for key in ("cloneStatus", "localPath", "lastSuccessfulSync", "errorMessage"):
+            before.pop(key, None)
+            after.pop(key, None)
+        if all(value.get("latestCommit") in (None, MANIFEST["applicationCommit"]) for value in (before, after)):
+            before.pop("latestCommit", None)
+            after.pop("latestCommit", None)
+    return applied == current
 
 
 def check_baseline(agent, baseline):
@@ -446,9 +477,19 @@ def configure(agent, values, directory, approve, switch_platform):
         entry = {"path": route, "desired": redact(body), "applied": None}
         ledger["objects"].append(entry)
         write_json(ledger_path, ledger)
-        agent.request("PUT", route, body)
+        try:
+            agent.request("PUT", route, body)
+        except RuntimeError as error:
+            cause = error.__cause__
+            if not (
+                isinstance(cause, HTTPError) and cause.code == 405
+                and body.get("properties", {}).get("dataConnectorType") == "KnowledgeFile"
+            ):
+                raise
+            print(f"WARNING: {error}. Checking whether the knowledge upload persisted; "
+                  "indexing is not yet verified.", file=sys.stderr)
         actual = agent.request("GET", route)
-        if not matches(redact(body), redact(actual)):
+        if not object_matches(body, actual):
             raise RuntimeError(f"Configuration verification failed: {route}; ledger retained for cleanup.")
         entry["applied"] = redact(actual)
         write_json(ledger_path, ledger)
@@ -492,11 +533,21 @@ def cleanup(agent, directory, approve):
         if present is not None:
             current = redact(agent.request("GET", entry["path"]))
             if entry["applied"] is not None:
-                if current != entry["applied"]:
+                if not unchanged_owned_object(entry["applied"], current):
                     raise ValueError(f"Object changed after setup; refusing deletion: {entry['path']}")
-            elif not matches(entry["desired"], current):
+            elif not object_matches(entry["desired"], current):
                 raise ValueError(f"Unverified object differs from intended setup; refusing deletion: {entry['path']}")
-            agent.request("DELETE", entry["path"])
+            try:
+                agent.request("DELETE", entry["path"])
+            except RuntimeError as error:
+                cause = error.__cause__
+                if not (
+                    isinstance(cause, HTTPError) and cause.code == 405
+                    and entry["desired"].get("properties", {}).get("dataConnectorType") == "KnowledgeFile"
+                ):
+                    raise
+                print(f"WARNING: {error}. Verifying knowledge deletion through collection readback.",
+                      file=sys.stderr)
             if any(item["name"] == entry["desired"]["name"]
                    for item in agent.collection(entry["path"].rsplit("/", 1)[0])):
                 raise RuntimeError(f"Deletion not yet verified: {entry['path']}; rerun cleanup.")
