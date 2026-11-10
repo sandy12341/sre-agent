@@ -1,12 +1,19 @@
 # Grubify App Issue Triage Runbook
 
-Triage incoming customer issues for the Grubify food ordering application. Focus on issues with **[Customer Issue]** in the title — these are user-reported problems. Classify them, add labels, and post a triage comment.
+Triage incoming customer issues for the configured Grubify demo repository.
+For the existing-agent customer demo, require BOTH **[Starter Demo]** and
+**[Customer Issue]** anywhere in the title. Classification, labels and comments
+are proposals only until the operator explicitly approves publication.
+Never operate on another repository or change the agent's configuration.
 
 ---
 
 ## Step 1: Get Open Issues
 
-Fetch all open issues from the repo. Focus on issues that have **[Customer Issue]** in the title and are unassigned/unlabeled. Skip issues that don't have the [Customer Issue] prefix (those are internal agent-created reports).
+Fetch open issues from the configured repository. For the existing-agent demo,
+skip any issue missing either required title marker; `[Customer Issue]` need not
+be the first text in the title. For the original new-agent lab, use its configured
+customer-issue marker. Internal RCA reports are not customer issues to triage.
 
 ---
 
@@ -15,7 +22,8 @@ Fetch all open issues from the repo. Focus on issues that have **[Customer Issue
 For each open issue, check its current state:
 
 ### Case A: Already triaged (bot comment + labels exist, no updates since)
-→ **Skip it** — already handled.
+→ **Skip it** — already handled. In the existing-agent demo, any existing Grubify
+SRE Agent Bot comment is a duplicate-prevention stop, even if labels later change.
 
 ### Case B: Has labels but NO bot comment
 This happens when another subagent (incident-handler or code-analyzer) created the issue with labels already applied. The issue is valid and already categorized.
@@ -35,7 +43,8 @@ Current labels: [list existing labels]
 → Do NOT change existing labels — they were set by the creating agent.
 
 ### Case C: Has a bot comment but labels were removed or changed
-→ **Re-triage** — classify again following Step 3 below.
+→ **Skip in the existing-agent demo** — do not post a duplicate comment.
+Only propose a separate re-triage if the operator explicitly requests it.
 
 ### Case D: No labels, no bot comment (new untriaged issue)
 → **Triage it** — continue to Step 3.

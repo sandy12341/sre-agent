@@ -1,6 +1,11 @@
 # GitHub Issue Formatting — Incident Report Template
 
-When creating a GitHub issue for an incident, use the following structured format. This ensures consistency, readability, and actionable write-ups.
+Use this structured format for a proposed incident report. Keep it draft-only
+until the operator explicitly approves publication. In public GitHub content,
+use neutral resource aliases and redact subscription/tenant IDs, private
+endpoints, credentials and personal data. Full identifiers belong only in the
+private operator evidence record. Mark unavailable measurements explicitly;
+never invent values to complete the template.
 
 ---
 
@@ -21,11 +26,11 @@ Use this exact markdown structure for the issue body:
 ````markdown
 # Incident Report: <short description>
 
-- **Incident ID:** `<incident-id or alert correlation ID>`
-- **Service:** Azure Container Apps — `<container-app-name>` (rg: `<resource-group>`)
-- **Subscription:** `<subscription-id>`
-- **FQDN:** `<app-fqdn>`
-- **Active revision:** `<revision-name>` (100% traffic)
+- **Incident ID:** `<public-safe correlation alias>`
+- **Service:** Azure Container Apps — `<API alias>` (rg: `<workload alias>`)
+- **Subscription:** `<redacted>`
+- **FQDN:** `<endpoint withheld>`
+- **Active revision:** `<revision alias and verified traffic allocation>`
 
 ## Summary
 
@@ -84,16 +89,17 @@ Use this exact markdown structure for the issue body:
 
 ## References
 
-- Container App: `<full ARM resource ID>`
-- Log Analytics Workspace ID: `<workspace GUID>`
-- App Insights: `<full ARM resource ID>`
+- Container App: `<API alias; full ID retained privately>`
+- Log Analytics Workspace: `<workload workspace alias>`
+- App Insights: `<workload telemetry alias>`
+- Source: `<public repository, verified commit and file:line>`
 ````
 
 ---
 
 ## Labels to Apply
 
-Based on classification, apply these labels to the GitHub issue:
+Based on classification, propose these labels. Applying them requires approval:
 
 | Condition | Labels |
 |-----------|--------|
@@ -119,8 +125,8 @@ When generating evidence, use `ExecutePythonCode` to create charts:
 
 ## Tips for Quality Incident Reports
 
-1. **Be specific** — include actual metric values, timestamps, and resource IDs
+1. **Be specific** — include actual metric values and timestamps; use public-safe resource aliases
 2. **Include stack traces** — paste the full exception with file:line references
 3. **Show before/after** — compare the anomaly window to the normal baseline
 4. **Actionable items** — every report must end with concrete next steps
-5. **Link resources** — include full ARM resource IDs for quick portal navigation
+5. **Link safely** — include public source links; retain private resource links only in operator evidence

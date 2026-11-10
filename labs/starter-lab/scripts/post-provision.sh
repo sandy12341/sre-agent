@@ -10,6 +10,28 @@
 # =============================================================================
 set -uo pipefail
 
+# Reuse mode never runs the original whole-agent configuration path.
+EXISTING_AGENT=$(azd env get-value EXISTING_SRE_AGENT_RESOURCE_ID 2>/dev/null || true)
+if [[ "$EXISTING_AGENT" == /subscriptions/*/providers/Microsoft.App/agents/* ]]; then
+  for option in "$@"; do
+    if [[ "$option" != "--build-only" ]]; then
+      echo "ERROR: Reuse mode supports --build-only here; use existing-agent.py for inventory, configuration and cleanup." >&2
+      exit 1
+    fi
+  done
+  for python_cmd in python python3; do
+    if command -v "$python_cmd" &>/dev/null && "$python_cmd" -c "import yaml" &>/dev/null; then
+      exec "$python_cmd" "$(dirname "$0")/existing-agent.py" build
+    fi
+  done
+  echo "ERROR: Existing-agent mode requires Python 3 with PyYAML." >&2
+  exit 1
+fi
+if [[ -n "$EXISTING_AGENT" ]]; then
+  echo "ERROR: Invalid EXISTING_SRE_AGENT_RESOURCE_ID; refusing new-agent fallback." >&2
+  exit 1
+fi
+
 # Windows compatibility: python3 may be 'python' on Windows
 if command -v python3 &>/dev/null; then
   PYTHON=python3

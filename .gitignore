@@ -12,3 +12,8 @@ samples/deployment-compliance/skills/.DS_Store
 
 # Browser automation artifacts
 .playwright-mcp/
+
+# Local lab environments and Python validation
+.azure/
+__pycache__/
+labs/starter-lab/scripts/.tmp/

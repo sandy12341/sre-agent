@@ -2,6 +2,31 @@
 
 Deploy an Azure SRE Agent, break a sample app, and watch it diagnose and fix the issue. **~40 minutes.**
 
+**Already have an agent?** Follow the [customer-demo reuse guide](CUSTOMER-DEMO.md)
+to keep that agent intact and deploy Grubify into a separate disposable resource
+group. The steps below are the original **new-agent** path.
+
+For an already prepared customer-demo environment, the presenter entry point is:
+
+```powershell
+python .\scripts\existing-agent.py demo --state-dir $State --approve-probe --approve-fault
+```
+
+It shows healthy cart operations, real failures, the new Azure Monitor alert,
+the automatic SRE investigation and its actual diagnosis. It pauses for browser
+demonstration and stops before remediation. See the [presenter flow and approval
+boundaries](CUSTOMER-DEMO.md#customer-facing-demo-failure-to-diagnosis).
+
+For the full failure-to-recovery test manual, presenter talk track and results
+checklist, see [Testcase.md](Testcase.md).
+
+The separate `watch-recovery` observer follows an agent-requested API restart
+in the original incident; it never submits the action or its approval. Optional
+three-request cart verification requires `--approve-probe`. See
+[agent-executed recovery observation](CUSTOMER-DEMO.md#agent-executed-recovery-observation).
+Its live approval/execution gates remain unverified; operator recovery is not
+proof that the agent performed remediation.
+
 ## Architecture
 
 <p align="center">

@@ -4,14 +4,46 @@
 `500 error`, `internal server error`, `HTTP 500`, `server error`, `application error`, `unresponsive`
 
 ## Scope
-Azure Container Apps endpoints returning HTTP 500 errors. Logs stored in Log Analytics Workspace.
+Azure Container Apps endpoints returning HTTP 500 errors. Use only the workload
+workspace, App Insights and resources named in the subagent context. Every
+mutation or external communication requires explicit operator approval.
+
+### Telemetry source and schema
+
+The pinned customer-demo API is .NET 9 with Azure Monitor OpenTelemetry.
+Workspace-backed queries use `AppRequests`, `AppExceptions` and
+`ContainerAppConsoleLogs_CL`. The classic App Insights query context instead
+exposes `requests`, `exceptions` and related tables used in later examples.
+Check the query context and available tables; do not interpret a schema error
+as absence of traffic. OpenTelemetry does not guarantee `performanceCounters`
+or exported `AzureMetrics` rows; use the live Azure Monitor metrics API when
+those tables/counters are unavailable.
+
+```kql
+AppRequests
+| where TimeGenerated > ago(1h)
+| where _ResourceId =~ "<workloadAppInsightsResourceId>"
+| summarize Requests=count(), Failures=countif(Success == false) by bin(TimeGenerated, 5m)
+```
+
+```kql
+AppExceptions
+| where TimeGenerated > ago(1h)
+| where _ResourceId =~ "<workloadAppInsightsResourceId>"
+| project TimeGenerated, ExceptionType, OuterMessage
+| order by TimeGenerated desc
+```
+
+Scope console queries to `ContainerAppName_s == "<apiName>"`. Allow for ingestion
+delay. An allocation `OutOfMemoryException` is not proof of a platform OOM kill
+or restart; correlate actual revision events and metrics before making that claim.
 
 ## Valid Azure Monitor Metric Names for Container Apps
 **IMPORTANT: Use ONLY these metric names with `az monitor metrics list`:**
 - `UsageNanoCores` — CPU usage (NOT CpuUsage, NOT CPUUsage)
 - `WorkingSetBytes` — Memory usage (NOT MemoryUsage, NOT MemoryWorkingSet)
 - `Requests` — HTTP request count
-- `RestartCount` — Container restarts (OOM indicator)
+- `RestartCount` — Container restarts (does not establish the restart cause)
 - `Replicas` — Active replica count
 - `CpuPercentage` — CPU percentage
 - `MemoryPercentage` — Memory percentage
@@ -66,8 +98,8 @@ az monitor metrics list --resource <resourceId> --metric "UsageNanoCores" --inte
 # Get Memory usage metrics (last 1 hour)
 az monitor metrics list --resource <resourceId> --metric "WorkingSetBytes" --interval PT5M --start-time $(date -u -d '1 hour ago' +"%Y-%m-%dT%H:%M:%SZ" 2>/dev/null || date -u -v-1H +"%Y-%m-%dT%H:%M:%SZ") --end-time $(date -u +"%Y-%m-%dT%H:%M:%SZ")
 
-# Example with full resource ID:
-az monitor metrics list --resource "/subscriptions/cbf44432-7f45-4906-a85d-d2b14a1e8328/resourceGroups/rg-grubify-app/providers/Microsoft.App/containerApps/ca-grubify-api" --metric "UsageNanoCores" --interval PT5M
+# Use the exact API resource ID supplied by the approved workload context:
+az monitor metrics list --resource "<resourceId>" --metric "UsageNanoCores" --interval PT5M
 ```
 
 ### 1.5 Memory Pressure Indicators
@@ -375,11 +407,13 @@ Escalate immediately if:
 
 ---
 
-## Phase 9: Send Analysis Email
+## Phase 9: Draft Analysis Summary
 
-After completing investigation, send an email summary to the incident stakeholders.
+After completing investigation, draft a summary for the operator. Do not send an
+email, post a GitHub comment/issue, add labels or change incident state without
+separate explicit approval.
 
-**Send to:** sre-team@contoso.com
+**Recipient:** selected by the operator; no recipient is preapproved.
 
 ### Email Structure
 
@@ -414,6 +448,10 @@ After completing investigation, send an email summary to the incident stakeholde
    - GitHub issue (if created)
 
 ### Sample Email Template
+
+The following values and incident are illustrative, not observed demo evidence.
+Replace them with verified measurements or mark the field unavailable. Do not
+infer CPU saturation or affected-user counts from this example.
 
 ```
 Subject: [Incident INC0012345] HTTP 500 Error Analysis - ca-grubify-api
