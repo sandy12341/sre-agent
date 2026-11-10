@@ -5,7 +5,7 @@
   "demoBranch": "demo/customer-ready",
   "applicationRepository": "sandy12341/grubify",
   "applicationBaseCommit": "6592accc6eef73e2d7c7339885386480cb49838f",
-  "applicationCommit": "376129c5400d52f4c6691669d397eece1b19104c",
+  "applicationCommit": "19bc48c2f2d23082b426989d8fced5a96cc56e6a",
   "applicationRef": "demo/starter-source",
   "issueMarker": "[Starter Demo]",
   "phase": 1

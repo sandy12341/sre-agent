@@ -15,14 +15,11 @@ runtime access, and retention. Before configuration, review the private baseline
 and exact configuration plan. A live demo is not ready until all three scenarios,
 alert routing, approval enforcement, reset, and cleanup have been rehearsed.
 
-Deployment is currently blocked: the pinned Grubify frontend Docker build uses
-Node.js 18. Approve an upgrade to a supported GA LTS release, rebuild the
-frontend, and update the source pin before provisioning. Passing local builds
-does not make the unsupported build image deployment-ready.
-
 The selected source revisions are recorded in [demo.json](demo.json). The Grubify
-demo branch adds Azure Monitor OpenTelemetry; the intentional memory leak is
-preserved. Images build from the exact commit and deploy by digest, while code
+demo branch adds Azure Monitor OpenTelemetry and a Node.js 24 LTS frontend build;
+the intentional memory leak is preserved. Its source workflow verifies matching
+package engines and builds the complete frontend container without Azure access.
+Images build from the exact commit and deploy by digest, while code
 indexing uses the corresponding branch after verifying its current commit.
 Never move that branch or update pins during a customer session.
 
