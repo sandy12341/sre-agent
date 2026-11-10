@@ -13,7 +13,7 @@ import subprocess
 import sys
 import time
 from urllib.error import HTTPError, URLError
-from urllib.parse import urlsplit
+from urllib.parse import urlencode, urlsplit
 from urllib.request import Request, urlopen
 
 
@@ -388,6 +388,77 @@ def object_matches(expected, actual):
     return matches(expected, actual)
 
 
+def knowledge_previews(document):
+    if not isinstance(document, dict) or not isinstance(document.get("results"), list):
+        raise ValueError("Unexpected knowledge search response.")
+    previews = {}
+    for fragment in document["results"]:
+        if isinstance(fragment, str):
+            # Search can split serialized documents into incomplete JSON chunks.
+            identity = re.match(r'^\{\s*"Id"\s*:\s*("(?:[^"\\]|\\.)*")', fragment)
+            if not identity:
+                continue
+            content = re.search(r'"Contents"\s*:\s*"((?:[^"\\]|\\.)*)', fragment)
+            if not content:
+                raise ValueError("Knowledge document has no readable content.")
+            name = json.loads(identity.group(1))
+            text = json.loads('"' + content.group(1) + '"')
+        elif isinstance(fragment, dict):
+            name, text = fragment.get("Id"), fragment.get("Contents")
+        else:
+            raise ValueError("Unexpected knowledge search result type.")
+        if not isinstance(name, str) or not isinstance(text, str):
+            raise ValueError("Knowledge document identity/content must be strings.")
+        previews[name] = text
+    return previews
+
+
+def verify_sources(agent, values):
+    validate_owned_workload(values)
+    if agent.id.lower() != required(values, "EXISTING_SRE_AGENT_RESOURCE_ID").lower():
+        raise ValueError("Source check targets a different agent.")
+    objects = generated_objects(values)
+    repo_path, expected_repo = next(
+        (path, body) for path, body in objects if body["type"] == "CodeRepo"
+    )
+    repo = agent.request("GET", repo_path)
+    if not object_matches(expected_repo, repo):
+        raise ValueError("Demo repository binding differs from the manifest.")
+    properties = repo["properties"]
+    if properties.get("cloneStatus") != "Ready" or properties.get("latestCommit") != MANIFEST["applicationCommit"]:
+        raise ValueError("Demo repository clone is not Ready at the pinned commit.")
+    print("Code checkout Ready at the pinned commit; semantic code scanning is not verified.")
+    inventory = agent.request("GET", "/api/v1/AgentMemory/files")
+    if not isinstance(inventory, dict) or not isinstance(inventory.get("files"), list):
+        raise ValueError("Unexpected knowledge inventory response.")
+    if inventory.get("continuationToken"):
+        raise ValueError("Knowledge inventory is paginated; inspect the full inventory in the portal.")
+    indexed = {}
+    for item in inventory["files"]:
+        if not isinstance(item, dict) or not isinstance(item.get("name"), str):
+            raise ValueError("Unexpected knowledge inventory item.")
+        indexed[item["name"]] = item.get("isIndexed") is True
+    for path, body in objects:
+        if body.get("properties", {}).get("dataConnectorType") != "KnowledgeFile":
+            continue
+        if not object_matches(body, agent.request("GET", path)):
+            raise ValueError(f"Knowledge upload metadata differs: {body['name']}")
+        name = f"knowledge_{body['name']}.md"
+        if not indexed.get(name):
+            raise ValueError(f"Knowledge document is not indexed: {name}")
+        filename = body["name"].removeprefix(f"starter-{values['AZURE_ENV_NAME']}-").removesuffix("-md")
+        source = (LAB / "knowledge-base" / f"{filename}.md").read_text(encoding="utf-8")
+        query = urlencode({"query": name + " " + source.splitlines()[0], "k": 20})
+        previews = knowledge_previews(agent.request("GET", "/api/v1/AgentMemory/documents?" + query))
+        if not previews.get(name, "").replace("\r\n", "\n").startswith(source[:256]):
+            raise ValueError(
+                f"Knowledge source is not searchable with the expected content: {name}. "
+                "Indexed/uploaded status alone is insufficient; review the index before rebuilding it."
+            )
+        print(f"Knowledge indexed and searchable with matching opening content: {name}")
+    print("Read-only code/knowledge checks passed. Verify live telemetry, issue access and alert routing separately.")
+
+
 def unchanged_owned_object(applied, current):
     applied, current = copy.deepcopy(applied), copy.deepcopy(current)
     if applied.get("type") == current.get("type") == "CodeRepo":
@@ -700,7 +771,7 @@ def seed_issues(approve):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("command", choices=("inventory", "plan", "configure", "cleanup", "build", "preflight",
-                                           "reset", "probe", "fault", "seed-issues"))
+                                           "reset", "probe", "fault", "seed-issues", "verify-sources"))
     parser.add_argument("--agent-id")
     parser.add_argument("--state-dir")
     parser.add_argument("--approve-configuration", action="store_true")
@@ -753,6 +824,8 @@ def main():
         print("Private configuration plan written. No writes or role assignments performed.")
     elif args.command == "configure":
         configure(agent, values, directory, args.approve_configuration, args.allow_platform_switch)
+    elif args.command == "verify-sources":
+        verify_sources(agent, values)
     else:
         cleanup(agent, directory, args.approve_cleanup)
 

@@ -147,6 +147,42 @@ Verify actual code/knowledge indexing, workload telemetry queries, tool
 availability, and response-plan routing in the portal. A matching API envelope
 does not prove indexing or live alert delivery.
 
+### Read-only source readiness check
+
+```powershell
+python .\scripts\existing-agent.py verify-sources --state-dir $State
+```
+
+This checks the repository binding, Ready clone and exact manifest commit, then
+checks all four knowledge uploads, indexed status and searchable opening content.
+Indexed filenames have the form `knowledge_starter-<environment>-<document>-md.md`;
+they differ from the upload display names. The check performs no agent writes.
+It does not certify semantic code scanning, full-document integrity, telemetry
+permissions, GitHub issue access or alert delivery; verify those with live queries
+and the three scenarios below.
+
+Do not treat `isIndexed: true` as sufficient: a live rehearsal listed the report
+template as indexed while searches omitted it. Rebuilding the existing knowledge
+index repaired retrieval without duplicate uploads or new permissions. If the
+check fails, inspect the actual source and search results first. Review the impact
+on all knowledge sources before triggering an agent-wide reindex through the
+trusted portal or the supported `sreagent_docs_memories_reindex` MCP command.
+Then rerun the check and have the selected subagent retrieve the document.
+
+The memory search API can return incomplete chunks of serialized documents.
+An MCP client that discards non-standalone JSON may incorrectly report no matches;
+the helper handles these chunks and verifies their document identity and content.
+The agent's own Memory Search must also succeed; do not substitute a different
+repository copy or silently infer a missing report template.
+
+The knowledge documents describe the pinned .NET API/React frontend, real routes,
+workspace-versus-App Insights schemas, bounded fault procedure, marker-scoped
+draft triage and public-safe incident reports. When changing them, review and
+refresh only the owned knowledge bindings, retain their prior applied snapshots
+in the private ledger, rebuild the index if needed and repeat both source checks.
+Do not bypass the configure command's existing-ledger guard or replace a baseline
+to conceal source drift.
+
 ## 4. Presenter runbook
 
 Select the namespaced `starter-<environment>-...` agents, not unrelated agents.

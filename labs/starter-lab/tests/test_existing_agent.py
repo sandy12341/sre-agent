@@ -168,6 +168,97 @@ class ExistingAgentTests(unittest.TestCase):
         metadata["metadata.uploadedFilename"] = "different.md"
         self.assertFalse(demo.object_matches(body, actual))
 
+    def source_agent(self):
+        objects = demo.generated_objects(VALUES)
+        stored, files, fragments = {}, [], []
+        for path, body in objects:
+            actual = copy.deepcopy(body)
+            properties = actual["properties"]
+            if actual["type"] == "CodeRepo":
+                properties.update(cloneStatus="Ready", latestCommit=demo.MANIFEST["applicationCommit"])
+                stored[path] = actual
+            elif properties.get("dataConnectorType") == "KnowledgeFile":
+                metadata = properties["extendedProperties"]
+                content = demo.base64.b64decode(metadata.pop("fileContent")).decode()
+                metadata["fileSize"] = len(content.encode())
+                metadata["metadata.uploadedFilename"] = metadata.pop("fileName")
+                stored[path] = actual
+                name = f"knowledge_{body['name']}.md"
+                files.append({"name": name, "isIndexed": True})
+                fragments.append(json.dumps({"Id": name, "Contents": content})[:1500])
+        inventory = {"files": files, "continuationToken": ""}
+        search = {"results": fragments + ["continued chunk without document identity"]}
+
+        def request(method, path, body=None):
+            self.assertEqual(method, "GET")
+            if path == "/api/v1/AgentMemory/files":
+                return inventory
+            if path.startswith("/api/v1/AgentMemory/documents?"):
+                return search
+            return stored[path]
+
+        return request, stored, inventory, search
+
+    def test_source_check_reads_actual_chunked_content_without_writes(self):
+        request, _, _, _ = self.source_agent()
+        with patch.object(self.agent, "request", side_effect=request):
+            demo.verify_sources(self.agent, VALUES)
+        self.assertEqual(self.agent.mutations, [])
+
+    def test_source_check_rejects_indexed_document_missing_from_search(self):
+        request, _, _, search = self.source_agent()
+        search["results"] = [part for part in search["results"] if "incident-report-template" not in part]
+        with patch.object(self.agent, "request", side_effect=request), \
+                self.assertRaisesRegex(ValueError, "not searchable.*incident-report-template"):
+            demo.verify_sources(self.agent, VALUES)
+        self.assertEqual(self.agent.mutations, [])
+
+    def test_source_check_rejects_wrong_content_and_unindexed_documents(self):
+        request, _, inventory, search = self.source_agent()
+        original = search["results"][0]
+        name = inventory["files"][0]["name"]
+        search["results"][0] = json.dumps({"Id": name, "Contents": "# Different document"})
+        with patch.object(self.agent, "request", side_effect=request), \
+                self.assertRaisesRegex(ValueError, "not searchable"):
+            demo.verify_sources(self.agent, VALUES)
+        search["results"][0] = original
+        inventory["files"][0]["isIndexed"] = False
+        with patch.object(self.agent, "request", side_effect=request), \
+                self.assertRaisesRegex(ValueError, "not indexed"):
+            demo.verify_sources(self.agent, VALUES)
+
+    def test_source_check_rejects_wrong_repo_pin_and_pending_clone(self):
+        request, stored, _, _ = self.source_agent()
+        repo = next(body for body in stored.values() if body["type"] == "CodeRepo")["properties"]
+        for update in ({"latestCommit": "different"}, {
+            "latestCommit": demo.MANIFEST["applicationCommit"], "cloneStatus": "Cloning",
+        }):
+            with self.subTest(update=update):
+                repo.update(update)
+                with patch.object(self.agent, "request", side_effect=request), \
+                        self.assertRaisesRegex(ValueError, "not Ready at the pinned commit"):
+                    demo.verify_sources(self.agent, VALUES)
+
+    def test_source_check_rejects_unexpected_or_paginated_inventory(self):
+        request, _, inventory, _ = self.source_agent()
+        inventory["continuationToken"] = "next-page"
+        with patch.object(self.agent, "request", side_effect=request), \
+                self.assertRaisesRegex(ValueError, "paginated"):
+            demo.verify_sources(self.agent, VALUES)
+        inventory.clear()
+        with patch.object(self.agent, "request", side_effect=request), \
+                self.assertRaisesRegex(ValueError, "Unexpected knowledge inventory"):
+            demo.verify_sources(self.agent, VALUES)
+
+    def test_knowledge_previews_accepts_objects_and_rejects_invalid_shapes(self):
+        self.assertEqual(demo.knowledge_previews({
+            "results": [{"Id": "document.md", "Contents": "# Heading"}],
+        }), {"document.md": "# Heading"})
+        for document in ([], {}, {"results": [123]}, {"results": [{"Id": "doc"}]},
+                         {"results": ['{"Id":"doc","Other":"value"}']}):
+            with self.subTest(document=document), self.assertRaises(ValueError):
+                demo.knowledge_previews(document)
+
     def test_only_empty_subagent_owner_can_be_omitted_by_service(self):
         body = {"name": "demo", "type": "ExtendedAgent", "owner": "", "properties": {}}
         actual = {key: value for key, value in body.items() if key != "owner"}
