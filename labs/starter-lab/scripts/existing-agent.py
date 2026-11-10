@@ -828,6 +828,342 @@ def visible_demo_message(message, started):
     )
 
 
+def load_demo_run(directory, filename):
+    filename = filename or ""
+    path = (directory / filename).resolve()
+    if path.parent != directory.resolve() or not filename.startswith("demo-run-") or not filename.endswith(".json"):
+        raise ValueError("A demo-run-*.json filename inside --state-dir is required.")
+    record = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(record, dict) or not isinstance(record.get("fault"), dict):
+        raise ValueError("Saved run has no bounded fault record; no traffic will be sent.")
+    fault_record = record["fault"]
+    if not all(type(value) is int for value in (
+        record.get("healthyCartPosts"), record.get("maxCartPosts"),
+        fault_record.get("failures"), fault_record.get("requests"),
+    )):
+        raise ValueError("Saved run has invalid traffic counts; no traffic will be sent.")
+    if (
+        record["healthyCartPosts"] != 3 or fault_record["failures"] != 6
+        or not 9 <= record["maxCartPosts"] <= 150
+        or not 6 <= fault_record["requests"] <= record["maxCartPosts"] - 3
+    ):
+        raise ValueError("Saved run has no verified bounded six-error fault; no traffic will be sent.")
+    demo_timestamp(record.get("faultStarted"))
+    return path, record
+
+
+def recovery_revision(command, values, revisions):
+    if not isinstance(command, str) or any(character in command for character in "\r\n;|&<>`$()\\"):
+        raise ValueError("Recovery requires one literal restart command, not shell expressions.")
+    tokens = shlex.split(command)
+    if tokens[:4] != ["az", "containerapp", "revision", "restart"] or len(tokens[4:]) % 2:
+        raise ValueError("The write tool did not request the approved revision restart.")
+    options = {}
+    for key, value in zip(tokens[4::2], tokens[5::2]):
+        if key not in ("--subscription", "--resource-group", "--name", "--revision", "--output") or key in options:
+            raise ValueError("Restart command has an unsupported or repeated option.")
+        options[key] = value
+    for key, expected in (
+        ("--subscription", required(values, "AZURE_SUBSCRIPTION_ID")),
+        ("--resource-group", required(values, "AZURE_RESOURCE_GROUP")),
+        ("--name", required(values, "CONTAINER_APP_NAME")),
+    ):
+        if options.get(key, "").lower() != expected.lower():
+            raise ValueError(f"Restart target differs from the approved workload: {key}.")
+    if options.get("--revision") not in revisions or options.get("--output", "none") not in ("none", "json"):
+        raise ValueError("Restart revision or output option differs from the approved command.")
+    return options["--revision"]
+
+
+def recovery_revisions(values):
+    revisions = az_json(
+        "containerapp", "revision", "list", "--subscription", required(values, "AZURE_SUBSCRIPTION_ID"),
+        "--resource-group", required(values, "AZURE_RESOURCE_GROUP"),
+        "--name", required(values, "CONTAINER_APP_NAME"),
+    )
+    active = {revision["name"]: revision["properties"] for revision in revisions
+              if revision["properties"]["active"] is True}
+    if not active:
+        raise ValueError("No active API revisions; recovery cannot be verified.")
+    return active
+
+
+def recovery_execution(message, started, values, revisions):
+    if (
+        str((message.get("author") or {}).get("role", "")).lower() != "sreagent"
+        or str(message.get("messageType", "")).lower() == "reasoning"
+        or demo_timestamp(message.get("timeStamp")) < started
+    ):
+        return None
+    execution = message.get("azCliExecution") or {}
+    original = execution.get("originalFunctionCall")
+    if not original:
+        return None
+    if not isinstance(original, str):
+        raise ValueError("Unexpected original tool-call schema; no execution attribution is claimed.")
+    function = json.loads(original)
+    if function.get("Name") != "RunAzCliWriteCommands":
+        return None
+    revision = recovery_revision(execution.get("command"), values, revisions)
+    if (
+        not execution.get("id") or not execution.get("toolCallId")
+        or execution["toolCallId"] != function.get("CallId")
+        or (function.get("Arguments") or {}).get("command") != execution["command"]
+        or demo_timestamp(execution.get("createdTimestamp")) < started
+    ):
+        raise ValueError("Write execution provenance does not match the fresh agent tool call.")
+    status = execution.get("status")
+    if not isinstance(status, str) or not status:
+        raise ValueError("Write execution has no service status.")
+    observed = {key: execution.get(key) for key in (
+        "id", "toolCallId", "command", "status", "createdTimestamp", "startedTimestamp",
+        "completedTimestamp", "executedBy", "error", "expiredByTimeout",
+    )}
+    observed.update(revision=revision, messageId=message["id"], approvalPresent=bool(message.get("approval")))
+    if status.lower() in ("denied", "rejected", "canceled", "cancelled") and not execution.get("startedTimestamp"):
+        return observed
+    if execution.get("error") or execution.get("expiredByTimeout") or status.lower() in ("failed", "error", "timedout"):
+        raise RuntimeError(f"Agent restart failed or timed out: {execution.get('error') or status}")
+    if status == "Completed":
+        if (execution.get("executedBy") or {}).get("userId") != "agent-default":
+            raise ValueError("Restart is not attributable to the observed agent executor; operator activity is not a pass.")
+        if not (
+            demo_timestamp(execution["createdTimestamp"])
+            <= demo_timestamp(execution.get("startedTimestamp"))
+            <= demo_timestamp(execution.get("completedTimestamp"))
+        ):
+            raise ValueError("Restart execution timestamps are inconsistent.")
+    return observed
+
+
+def recovery_activity(agent, values, executions):
+    principals = {agent.arm.get("identity", {}).get("principalId")}
+    principals.update(
+        identity.get("principalId")
+        for identity in agent.arm.get("identity", {}).get("userAssignedIdentities", {}).values()
+    )
+    principals = {str(principal).lower() for principal in principals if principal}
+    if not principals:
+        raise ValueError("Cannot establish the agent's Azure execution identities.")
+    target = (
+        f"/subscriptions/{required(values, 'AZURE_SUBSCRIPTION_ID')}/resourceGroups/"
+        f"{required(values, 'AZURE_RESOURCE_GROUP')}/providers/Microsoft.App/containerApps/"
+        f"{required(values, 'CONTAINER_APP_NAME')}"
+    ).lower()
+    events = az_json(
+        "monitor", "activity-log", "list", "--subscription", required(values, "AZURE_SUBSCRIPTION_ID"),
+        "--resource-group", required(values, "AZURE_RESOURCE_GROUP"),
+        "--start-time", min(execution["startedTimestamp"] for execution in executions),
+        "--max-events", "1000",
+    )
+    if not isinstance(events, list) or len(events) >= 1000:
+        raise ValueError("Activity inventory is invalid or may be truncated; no attribution is claimed.")
+    matched = {}
+    used = set()
+    for execution in executions:
+        for event in events:
+            resource = str(event.get("resourceId", "")).lower()
+            if (
+                (event.get("operationName") or {}).get("value", "").lower()
+                != "microsoft.app/containerapps/revisions/restart/action"
+                or (event.get("status") or {}).get("value", "").lower() != "succeeded"
+                or str(event.get("caller", "")).lower() not in principals
+                or resource not in (target, target + "/revisions/" + execution["revision"].lower())
+            ):
+                continue
+            stamp = demo_timestamp(event.get("eventTimestamp"))
+            if not demo_timestamp(execution["startedTimestamp"]) <= stamp <= demo_timestamp(execution["completedTimestamp"]):
+                continue
+            event_id = event.get("eventDataId")
+            if not event_id or event_id in used:
+                continue
+            used.add(event_id)
+            matched[execution["id"]] = {
+                key: event.get(key) for key in ("eventDataId", "correlationId", "eventTimestamp", "resourceId", "caller")
+            }
+            break
+    return matched if len(matched) == len(executions) else None
+
+
+def watch_recovery(agent, values, directory, args):
+    if not 60 <= args.wait_seconds <= 1200:
+        raise ValueError("Recovery observation requires 60-1200 seconds per stage.")
+    subscription, group, environment = validate_owned_workload(values)
+    if agent.id.lower() != required(values, "EXISTING_SRE_AGENT_RESOURCE_ID").lower():
+        raise ValueError("Recovery targets a different agent.")
+    properties = agent.read_arm()["properties"]
+    if (
+        properties["actionConfiguration"]["mode"].lower() != "review"
+        or properties["incidentManagementConfiguration"]["type"] != "AzMonitor"
+    ):
+        raise ValueError("Recovery requires the existing Review/Azure Monitor configuration; no settings will be changed.")
+    source_path, source = load_demo_run(directory, args.run_record)
+    if source.get("status") != "diagnosis_complete":
+        raise ValueError("Recovery requires a completed real demo diagnosis.")
+    thread_id = source.get("threadId", "")
+    if not isinstance(thread_id, str) or not re.fullmatch(r"[a-zA-Z0-9-]+", thread_id):
+        raise ValueError("Saved run has no valid automatic incident thread.")
+    rule_id = f"/subscriptions/{subscription}/resourceGroups/{group}/providers/Microsoft.Insights/metricAlerts/alert-http-5xx-{environment}"
+    target_id = f"/subscriptions/{subscription}/resourceGroups/{group}/providers/Microsoft.App/containerApps/{required(values, 'CONTAINER_APP_NAME')}"
+    fault_started = demo_timestamp(source["faultStarted"])
+
+    def incident():
+        alerts = [alert for alert in demo_alerts(values) if alert["id"].lower() == str(source.get("alertId", "")).lower()]
+        alert = new_demo_alert(alerts, rule_id, target_id, fault_started)
+        current = agent.request("GET", f"/api/v1/threads/{thread_id}")
+        if alert is None or not correlated_demo_thread([current], alert, rule_id, fault_started):
+            raise ValueError("Recovery alert/automatic incident no longer matches the original workload fault.")
+        return alert, current
+
+    incident()
+    active = recovery_revisions(values)
+    path = directory / ("recovery-" + source_path.name)
+    binding = {"agentId": agent.id, "apiId": target_id, "threadId": thread_id, "alertId": source["alertId"]}
+    if path.exists():
+        record = json.loads(path.read_text(encoding="utf-8"))
+        if any(record.get(key) != value for key, value in binding.items()) or set(record["revisions"]) != set(active):
+            raise ValueError("Recovery record or active revisions changed; do not reuse this approval envelope.")
+        record.setdefault("resumes", []).append({
+            "at": datetime.now(timezone.utc).isoformat(), "priorStatus": record["status"], "priorError": record.get("error"),
+        })
+    else:
+        record = {
+            **binding, "started": datetime.now(timezone.utc).isoformat(), "revisions": sorted(active),
+            "executions": {}, "probe": {"status": "not_started", "budgetReserved": 0},
+            "approvalGateVerification": "requires_live_denial_and_approval_test",
+        }
+    started = demo_timestamp(record["started"])
+    record["status"] = "observing"
+    write_json(path, record)
+    print(f"\nRECOVERY OBSERVER | Thread: {thread_id}\nPrivate record: {path}", flush=True)
+    print("No restart, agent message, approval or configuration write is sent by this helper.", flush=True)
+    print("In THAT incident, request a proposal and a real platform approval. Withhold approval first.", flush=True)
+    print("Only after specific authorization, ask the agent to execute each approved command once:", flush=True)
+    for revision in record["revisions"]:
+        print(shlex.join([
+            "az", "containerapp", "revision", "restart", "--subscription", subscription,
+            "--resource-group", group, "--name", required(values, "CONTAINER_APP_NAME"),
+            "--revision", revision, "--output", "none",
+        ]), flush=True)
+    print("Use RunAzCliWriteCommands; no loops/variables/other writes. Restart loses in-memory carts.", flush=True)
+    print("Observed queue/status messages alone do NOT certify approval enforcement.", flush=True)
+
+    try:
+        def observe_execution():
+            incident()
+            for message in agent.collection(f"/api/v1/threads/{thread_id}/messages"):
+                execution = recovery_execution(message, started, values, record["revisions"])
+                if execution is None:
+                    continue
+                previous = record["executions"].get(execution["id"])
+                record["executions"][execution["id"]] = execution
+                if previous != execution:
+                    print(f"Agent write {execution['id']}: {execution['status']} | {execution['command']}", flush=True)
+            write_json(path, record)
+            completed = [execution for execution in record["executions"].values() if execution["status"] == "Completed"]
+            names = [execution["revision"] for execution in completed]
+            if len(names) != len(set(names)):
+                raise ValueError("More than one agent restart of a revision was observed; stop and review the operation budget.")
+            if any(
+                execution["revision"] in names
+                and execution["status"].lower() not in ("completed", "denied", "rejected", "canceled", "cancelled")
+                for execution in record["executions"].values()
+            ):
+                raise ValueError("An additional write request is still live for an already restarted revision.")
+            if set(names) != set(record["revisions"]):
+                return None
+            return completed
+
+        executions = wait_for_demo("actual scoped agent restart tool execution", observe_execution, args.wait_seconds)
+        activity = wait_for_demo("matching agent-identity Azure restart activity",
+                                 lambda: recovery_activity(agent, values, executions), args.wait_seconds)
+        record["activity"] = activity
+        write_json(path, record)
+
+        def healthy():
+            current = recovery_revisions(values)
+            if set(current) != set(record["revisions"]):
+                raise ValueError("Active revisions changed during restart-only recovery.")
+            if all(str(properties.get("healthState", "")).lower() == "healthy" for properties in current.values()):
+                return {"verified": datetime.now(timezone.utc).isoformat(), "revisions": sorted(current)}
+            return None
+
+        record["readiness"] = wait_for_demo("healthy active API revisions", healthy, args.wait_seconds)
+        if record["probe"]["status"] != "completed":
+            if record["probe"]["status"] != "not_started":
+                raise RuntimeError("A prior cart probe was interrupted or failed. No automatic repeat is allowed; review its request budget.")
+            if not args.approve_probe:
+                raise RuntimeError("Agent restart observed; business recovery unverified. Three cart POSTs require --approve-probe.")
+            reservation = path.with_suffix(".probe-reservation")
+            try:
+                with reservation.open("x", encoding="utf-8") as output:
+                    json.dump({"budgetReserved": 3, "recoveryRecord": path.name}, output)
+            except FileExistsError as error:
+                record["probe"] = {"status": "reservation_exists", "budgetReserved": 3}
+                raise RuntimeError("Cart budget was already reserved. No automatic repeat is allowed; review the private evidence.") from error
+            reservation.chmod(0o600)
+            record["probe"] = {"status": "running", "budgetReserved": 3}
+            write_json(path, record)
+            probe(values, True)
+            record["probe"].update(status="completed", completed=datetime.now(timezone.utc).isoformat())
+            write_json(path, record)
+        else:
+            print("Reusing the recorded three successful cart checks; no additional POSTs.", flush=True)
+
+        def resolved():
+            alert, _ = incident()
+            essentials = alert["properties"]["essentials"]
+            if essentials.get("monitorCondition") == "Resolved":
+                stamp = essentials.get("monitorConditionResolvedDateTime")
+                demo_timestamp(stamp)
+                return stamp
+            return None
+
+        record["alertResolved"] = wait_for_demo("the SAME alert's Resolved monitor condition", resolved, args.wait_seconds)
+        write_json(path, record)
+        print(
+            "Independent checks: three cart POSTs succeeded; the original alert is now Resolved "
+            "(its resolution may predate restart). Request the final RCA in the SAME incident: "
+            "cite the actual write execution, distinguish operator/helper actions from agent actions, "
+            "use the verified alert/thread context, explain temporary mitigation versus permanent fix, "
+            "and do not publish or change incident status.",
+            flush=True,
+        )
+
+        def final_report():
+            _, current = incident()
+            message = current.get("lastMessage") or {}
+            if (
+                not visible_demo_message(message, demo_timestamp(record["probe"]["completed"]))
+                or str(message.get("messageType", "")).lower() == "trajectoryinsight"
+                or not message.get("text")
+                or any(message.get(key) for key in ("approval", "userQuestion"))
+                or any(message.get(key) for key in message if key.endswith(("Execution", "ExecutionGroup", "Result")))
+                or str((current.get("incidentDetails") or {}).get("investigationStatus", "")).lower()
+                not in ("complete", "completed")
+            ):
+                return None
+            return message["text"]
+
+        record["rca"] = wait_for_demo("a fresh completed final RCA after the business checks", final_report, args.wait_seconds)
+        record.update(status="service_recovery_verified", completed=datetime.now(timezone.utc).isoformat())
+        record.pop("error", None)
+        write_json(path, record)
+        print(record["rca"], flush=True)
+        print(
+            "SERVICE RECOVERY VERIFIED: agent tool + Azure activity + readiness + three cart checks + alert + RCA. "
+            "Approval-gate enforcement still requires its separate live denial/approval test; "
+            "review RCA accuracy before claiming the Starter release passed.",
+            flush=True,
+        )
+        return record
+    except (ValueError, KeyError, RuntimeError, OSError, KeyboardInterrupt) as error:
+        record.update(status="interrupted" if isinstance(error, KeyboardInterrupt) else "failed",
+                      error=str(error), stopped=datetime.now(timezone.utc).isoformat())
+        write_json(path, record)
+        raise
+
+
 def present_demo(agent, values, directory, args):
     resume = args.command == "watch-demo"
     if not resume and (not args.approve_probe or not args.approve_fault):
@@ -869,26 +1205,7 @@ def present_demo(agent, values, directory, args):
     agent.collection("/api/v1/threads")
     started = datetime.now(timezone.utc)
     if resume:
-        filename = args.run_record or ""
-        path = (directory / filename).resolve()
-        if path.parent != directory.resolve() or not filename.startswith("demo-run-") or not filename.endswith(".json"):
-            raise ValueError("watch-demo requires --run-record with a demo-run-*.json filename inside --state-dir.")
-        record = json.loads(path.read_text(encoding="utf-8"))
-        if not isinstance(record, dict) or not isinstance(record.get("fault"), dict):
-            raise ValueError("Saved run has no bounded fault record; watch-demo will not send traffic.")
-        fault_record = record.get("fault") or {}
-        if not all(type(value) is int for value in (
-            record.get("healthyCartPosts"), record.get("maxCartPosts"),
-            fault_record.get("failures"), fault_record.get("requests"),
-        )):
-            raise ValueError("Saved run has invalid traffic counts; watch-demo will not send traffic.")
-        if (
-            record.get("healthyCartPosts") != 3 or fault_record.get("failures") != 6
-            or not 9 <= record.get("maxCartPosts", 0) <= 150
-            or not 6 <= fault_record.get("requests", 0) <= record["maxCartPosts"] - 3
-        ):
-            raise ValueError("Saved run has no verified bounded six-error fault; watch-demo will not send traffic.")
-        demo_timestamp(record.get("faultStarted"))
+        path, record = load_demo_run(directory, args.run_record)
         record.setdefault("watchResumes", []).append({
             "resumed": started.isoformat(), "priorStatus": record.get("status"),
             "priorError": record.pop("error", None), "priorStopped": record.pop("stopped", None),
@@ -1044,7 +1361,8 @@ def main():
     configure_console()
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("command", choices=("inventory", "plan", "configure", "cleanup", "build", "preflight",
-                                           "reset", "probe", "fault", "seed-issues", "verify-sources", "demo", "watch-demo"))
+                                           "reset", "probe", "fault", "seed-issues", "verify-sources", "demo", "watch-demo",
+                                           "watch-recovery"))
     parser.add_argument("--agent-id")
     parser.add_argument("--state-dir")
     parser.add_argument("--approve-configuration", action="store_true")
@@ -1104,6 +1422,8 @@ def main():
         verify_sources(agent, values)
     elif args.command in ("demo", "watch-demo"):
         present_demo(agent, values, directory, args)
+    elif args.command == "watch-recovery":
+        watch_recovery(agent, values, directory, args)
     else:
         cleanup(agent, directory, args.approve_cleanup)
 

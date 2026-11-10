@@ -4,6 +4,9 @@ This path reuses an existing agent and deploys **only the Grubify workload** int
 a separate disposable resource group. It does not own, replace, or delete the
 agent, its identity, or its existing integrations.
 
+For the complete test procedure, presenter talk track, approval-controlled
+recovery and acceptance checklist, use [Testcase.md](Testcase.md).
+
 ## Customer-facing demo: failure to diagnosis
 
 After the one-time setup below, run this from the Starter lab folder:
@@ -60,6 +63,62 @@ Use the existing run filename under `$State`. This sends no cart requests and
 accepts only that run's real alert/automatic incident. Earlier watcher errors
 are retained in its resume history. The CLI uses UTF-8 for actual SRE responses,
 including Unicode tool-status messages on Windows.
+
+### Agent-executed recovery observation
+
+The diagnosis-only `demo` and read-only `watch-demo` contracts are unchanged.
+For the selected end-to-end extension, start this observer **before** requesting
+a restart in the same automatic incident:
+
+```powershell
+python .\scripts\existing-agent.py watch-recovery --state-dir $State `
+  --run-record '<demo-run-filename.json>' --wait-seconds 600
+```
+
+It prints the exact incident and literal API-revision restart commands. Ask the
+agent for the proposal and actual Review-mode tool approval in that incident.
+The helper sends **no agent messages, approvals or restart commands**. Withhold
+and deny the real approval first; verify no action occurred. A conversational
+"shall I proceed?" or a queued execution does not certify platform enforcement.
+Only after separate authorization, approve the specific action in the portal.
+
+The observer requires a fresh `RunAzCliWriteCommands` event with matching call
+metadata, exact subscription/group/API/active revision, completed timestamps
+and the observed agent executor marker. It also requires a matching successful
+Azure restart activity event from an agent managed identity. A display name,
+operator restart, stale event or agent claim alone cannot pass. Unsupported
+write/approval schemas remain a live verification blocker, not guessed success.
+
+After agent execution and revision health, the observer stops unless three
+independent cart POSTs were separately authorized. With that authorization:
+
+```powershell
+python .\scripts\existing-agent.py watch-recovery --state-dir $State `
+  --run-record '<demo-run-filename.json>' --approve-probe --wait-seconds 600
+```
+
+The probe flag authorizes only those three synthetic writes, **not the agent's
+restart**. Successful probes are recorded once; resume does not repeat them.
+Interrupted/failed probes reserve their budget and require operator review,
+not an automatic retry. The private `.probe-reservation` file prevents duplicate
+probe attempts; do not delete it to bypass the budget. Run one observer per run
+record. An observer without this flag never sends cart traffic.
+
+The observer waits for the same alert's Resolved monitor condition, then prompts
+for a fresh final RCA in the same incident after verification. It records
+`service_recovery_verified` only after execution/activity/readiness/business/
+monitor/RCA evidence. Approval enforcement and RCA accuracy remain separate
+review gates; this status is not a Phase 1 release certificate.
+
+Records are private `recovery-demo-run-*.json` files next to, not overwriting,
+the original diagnosis record. Stage waits are bounded to 60-1200 seconds.
+No automatic fault traffic, operator fallback, policy change, deployment or
+GitHub publication occurs. See [Testcase.md](Testcase.md) for the full talk track.
+
+**Validation status:** observer safety tests are offline. Real approval denial,
+agent restart and the two-cycle recovery rehearsal remain unverified. The
+operator chose to continue offline before sending the capability-test prompt;
+no restart or cart probe was executed for that test.
 
 The original [new-agent lab](README.md) remains available. Do not use
 `scripts/setup.sh` for this reuse path: it is the original whole-agent setup.
@@ -269,9 +328,11 @@ Presenter prompt for the incident handler:
 > change resources until I approve a specific mitigation.
 
 Independently verify Azure Monitor alert delivery to the agent; manual chat is
-not proof of automatic routing. Demonstrate withholding approval before granting
-it. Recovery should clear process-local cache by restarting all active API
-revisions. Operator fallback:
+not proof of automatic routing. Use the recovery observer above to distinguish
+actual agent execution from an operator action. Demonstrate the real approval
+boundary; do not claim it was verified from Review mode alone. Recovery should
+clear process-local cache by restarting all active API revisions.
+Separately approved operator fallback (does not count as agent remediation):
 
 ```powershell
 python .\scripts\existing-agent.py reset --approve-reset

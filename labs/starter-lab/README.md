@@ -17,6 +17,16 @@ the automatic SRE investigation and its actual diagnosis. It pauses for browser
 demonstration and stops before remediation. See the [presenter flow and approval
 boundaries](CUSTOMER-DEMO.md#customer-facing-demo-failure-to-diagnosis).
 
+For the full failure-to-recovery test manual, presenter talk track and results
+checklist, see [Testcase.md](Testcase.md).
+
+The separate `watch-recovery` observer follows an agent-requested API restart
+in the original incident; it never submits the action or its approval. Optional
+three-request cart verification requires `--approve-probe`. See
+[agent-executed recovery observation](CUSTOMER-DEMO.md#agent-executed-recovery-observation).
+Its live approval/execution gates remain unverified; operator recovery is not
+proof that the agent performed remediation.
+
 ## Architecture
 
 <p align="center">
